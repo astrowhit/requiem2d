@@ -10,7 +10,7 @@ from grizli.multifit import GroupFLT, MultiBeam
 
 
 class Photometry(object):
-    def __init__(self, id, global_photometry, im_root, region_files=None,
+    def __init__(self, id, global_photometry, im_root, region_file=None,
                 sci_ext=0, aper_correct_file=None):
         """
         TBD
@@ -27,13 +27,14 @@ class Photometry(object):
         for band in self.bands:
             self.ref_phot_dict[band]={}
 
-        self.reg_files=region_files
-        self.sci_ext=sci_ext
+        self.reg_file = region_file
+        self.regions = pyregion.open(region_file)
+        self.sci_ext = sci_ext
         self.aper_correct_file = aper_correct_file
 
         self.process_global_photometry()
         self.process_image_files()
-        #self.process_resolved_photometry()
+        self.process_resolved_photometry()
 
     def _isIR(self, band):
         """
@@ -78,68 +79,68 @@ class Photometry(object):
 
         self.ref_in_path=im_path
         self.ref_im = im_hdu[self.sci_ext].data*1.0
-        self.ref_seg = seg_hdu[self.sci_ext].data*1.0
+        self.ref_seg = seg_hdu[self.sci_ext].data*1
         self.ref_wht = wht_hdu[self.sci_ext].data*1.0
 
         self.ref_hdu=im_hdu
         self.ref_wcs = pywcs.WCS(im_hdu[self.sci_ext].header)
 
-        seg_hdu.close()
-        im_hdu.close()
 
     def process_resolved_photometry(self):
         """
         TBD
         """
 
-        seg_mask = np.zeros_like(ref_seg, dtype=np.bool)
+        seg_mask = np.zeros_like(self.ref_seg, dtype=np.bool)
         seg_mask[self.ref_seg==self.global_id]=True
         self.resolved_seg = np.zeros_like(self.ref_seg)
 
         # Create masks using segmentation map and user provided region reg_files
         # to calculate the initial photometry for each band
-        for ireg, reg_file in enumerate(self.reg_files):
-            reg_handle = pyregion.open(reg_file)
-            reg_mask = reg_handle.get_mask(hdu=self.ref_hdu[self.sci_ext])
-            mask = reg_mask & seg_mask
-
+        for ireg, reg in enumerate(self.regions):
             self.resolved_ids.append(1e4+ireg+1)
-            self.resolved_seg[seg_mask] = 1e4+ireg+1
             id_key = 'bin_{0}'.format(ireg+1)
-            self.ref_phot_dict[band][id_key] = {}
 
             for iband, band in enumerate(self.bands):
-
+                if band[:-1]=='IRAC':
+                    continue
+                self.ref_phot_dict[band][id_key] = {}
                 if iband == 0:
                     im = self.ref_im*1.0
                     wht = self.ref_wht*1.0
+                    reg_mask = self.regions.get_filter(self.ref_hdu[self.sci_ext].header)[ireg].mask(im.shape)
+                    self.ref_phot_dict[band]['photflam']=self.ref_hdu[self.sci_ext].header['PHOTFLAM']*1.0
+                    self.resolved_seg[seg_mask & reg_mask] = 1e4+ireg+1
                 else:
                     if self._isIR(band):
-                        im_path = self.im_root+band+'_drc_sci.fits'
-                        wht_path = self.im_root+band+'_drc_wht.fits'
+                        im_path = self.im_root+band+'_drz_sci.fits'
+                        wht_path = self.im_root+band+'_drz_wht.fits'
                     else:
                         im_path = self.im_root+band+'_drc_sci.fits'
                         wht_path = self.im_root+band+'_drc_wht.fits'
                     im_hdu = pyfits.open(im_path)
                     wht_hdu = pyfits.open(wht_path)
+                    self.ref_phot_dict[band]['photflam']=im_hdu[self.sci_ext].header['PHOTFLAM']*1.0
                     im = im_hdu[self.sci_ext].data*1.0
                     wht = wht_hdu[self.sci_ext].data*1.0
+                    reg_mask = self.regions.get_filter(im_hdu[self.sci_ext].header)[ireg].mask(im.shape)
                     im_hdu.close()
                     wht_hdu.close()
 
+                mask = reg_mask & seg_mask
                 flam_ = im[mask].sum()
                 eflam_ = np.sqrt(np.sum(1.0/wht[mask]))
                 Npix = mask.sum()
 
-                self.ref_phot_dict[band][id_key]['flam']=flam_
-                self.ref_phot_dict[band][id_key]['eflam']=eflam_
+                self.ref_phot_dict[band][id_key]['flam']=flam_*self.ref_phot_dict[band]['photflam']
+                self.ref_phot_dict[band][id_key]['eflam']=eflam_*self.ref_phot_dict[band]['photflam']
                 self.ref_phot_dict[band][id_key]['Npix']=Npix
 
         # Implement aperture correction to fluxes and errors if necessary
         # files are provided by user
         band=self.bands[0]
         flam_=0.0
-        for ireg in range(len(self.reg_files)):
+        for ireg in range(len(self.regions)):
             id_key = 'bin_{0}'.format(ireg+1)
             flam_+=self.ref_phot_dict[band][id_key]['flam']
         self.phot_scale = self.ref_phot_dict[band]['global']['flam']/flam_
@@ -149,21 +150,26 @@ class Photometry(object):
         print('#####################')
         print('Aperture correction for resolved bins = {0:1.2f}'.format(self.phot_scale))
 
-        for ireg in range(len(self.reg_files)):
+        for ireg in range(len(self.regions)):
+            id_key = 'bin_{0}'.format(ireg+1)
             for iband, band in enumerate(self.bands):
+                if band[:-1]=='IRAC':
+                    continue
                 self.ref_phot_dict[band][id_key]['flam']*=self.phot_scale
                 self.ref_phot_dict[band][id_key]['eflam']*=self.phot_scale
 
         if self.aper_correct_file is not None:
             tab=asc.read(self.aper_correct_file)
-            for ireg in range(len(self.reg_files)):
+            for ireg in range(len(self.regions)):
                 id_key = 'bin_{0}'.format(ireg+1)
                 for iband, band in enumerate(self.bands):
+                    if band[:-1]=='IRAC':
+                        continue
                     loc = tab['bands'] == band
                     alpha = tab['alpha'][loc][0]
                     beta = tab['beta'][loc][0]
                     Npix = self.ref_phot_dict[band][id_key]['Npix']
-                    self.ref_phot_dict[band][id_key]['eflam'] = alpha*(np.sqrt(Npix))**beta
+                    self.ref_phot_dict[band][id_key]['eflam'] = self.ref_phot_dict[band]['photflam']*alpha*(np.sqrt(Npix))**beta
 
         self.updated_seg = np.zeros_like(self.ref_seg)
         self.updated_seg[self.ref_seg==self.global_id]=self.resolved_seg[self.ref_seg==self.global_id]*1
@@ -176,7 +182,7 @@ class Photometry(object):
         hdu_=pyfits.PrimaryHDU(data=self.updated_seg, header=self.ref_wcs.to_header())
         hdu_.writeto(self.im_root+'_updated_seg.fits', overwrite=overwrite)
         hdu_.close()
-        self.updated_seg_path = self.im_root+'_updated_seg.fits'
+        self.updated_seg_path = self.im_root+self.bands[0]+'_updated_seg.fits'
 
 
 
@@ -193,5 +199,5 @@ class ResolvedModel(Photometry):
 
         self.grp = GroupFLT(grism_files=grism_flts, direct_files=[], cpu_count=4,
                             ref_file=self.ref_im_path, seg_file=self.ref_seg_path,
-                            catalog=self.im_root+'_{0}.cat'.format(self.phot.bands[0]),
+                            catalog=self.im_root+'{0}.cat'.format(self.phot.bands[0]),
                             MW_EBV= MW_EBV)
