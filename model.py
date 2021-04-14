@@ -13,6 +13,11 @@ import astropy.units as u
 from utils import *
 from tqdm import trange
 import hickle as hkl
+import scipy.ndimage as nd
+import pymc3 as pm
+import theano.tensor as tt
+from theano import shared
+
 
 
 class Photometry(object):
@@ -263,21 +268,64 @@ class ResolvedModel(Photometry):
         if save_data:
             self.grp.save_full_data()
 
-    def make_joint_models(self, phot_prior_dict, weights=None,
-                                  PCA_keys=['logzsol', 'dust2'], PCA_nbox=[3, 4],
-                                  Nbox=15, make_PCA_plot=True, save_data=True):
+    def init_grism_mask(self, low_lim=1.2, up_lim=1.6):
+        """
+        TBD
+        """
+        beam = self.st['bin_1'].beams[0]
+        cc = np.ones(shape=(len(self.st['bin_1'].beams), beam.sh[0], beam.sh[1])).astype(bool)
+        for ib, beam in enumerate(self.st['bin_1'].beams):
+            ref_wave = beam.wave / 1e4
+            cond = (ref_wave * 0.0).astype(bool)
+            loc = (ref_wave > low_lim) & (ref_wave < up_lim)
+            cond = cond | loc
+            cond = cond.astype(np.int)
+            cond = np.ones(beam.sh) * cond[np.newaxis, :]
+            cond = cond.astype(bool)
+            cc[ib] = cc[ib] & cond
+        cc = cc.astype(np.bool).flatten()
+        self.fcc = np.ones((cc.shape[0])).astype(np.bool)
+        fit_mask = np.zeros_like(cc, dtype=np.bool)
+        for bin_id in self.st.keys():
+            fit_mask = fit_mask | self.st[bin_id].fit_mask
+        self.fcc = cc & fit_mask
+
+    def perform_fit(self, tune=1000, draws=1000, chains=2, target_accept=0.9,
+                    method='advi+adapt_diag', save_trace=True):
+        """
+        TBD
+        """
+        with self.pymc3_model:
+            trace = pm.sample(tune=tune, draws=draws, n_init=200000, chains=chains,
+             cores=4, init=method, target_accept=target_accept)
+        self.trace = trace
+        self.trace_values = {}
+        for ky in self.trace.varnames:
+            self.trace_values[ky] = self.trace.get_values(ky)
+        if save_trace:
+            hkl.dump(self.trace_values, self.im_root+'trace.hkl', mode='w', compression='lzf')
+
+    def load_joint_models(self, phot_prior_dict, weights, path=None):
         """
         TBD
         """
         import fsps
 
+        if path is None:
+            self.Model=hkl.load(self.im_root+'Model.hkl')
+        else:
+            self.Model=hkl.load(path)
+
         theta_labels=list(phot_prior_dict.keys())
         if weights is None:
             weights = np.ones_like(phot_prior_dict[theta_labels[0]])
 
-        xN, yN=PCA_nbox
+        xN=self.Model['bin_1']['phot'].shape[0]
+        yN=self.Model['bin_1']['phot'].shape[1]
         xN+=1
         yN+=1
+        self.xN=xN
+        self.yN=yN
 
         cosmo = FlatLambdaCDM(H0=70.0 * u.km/u.s/u.Mpc, Om0=0.3)
         dL = cosmo.luminosity_distance(self.z).to(u.cm).value
@@ -308,6 +356,258 @@ class ResolvedModel(Photometry):
         AGE_edge=np.asarray(AGE_edge)
 
         self.AGE=AGE
+        self.AGE_edge=AGE_edge
+        self.AGE_width = (AGE_edge[1:]-AGE_edge[:-1])
+
+    def init_fitter(self, sfh_prior='linear_ar2', k=1, tau=400,
+                    include_global=True, global_bands=['IRAC1', 'IRAC2'],
+                    low_pol=0, up_pol=2):
+        """
+        TBD
+        """
+
+        self.init_grism_mask()
+
+        A_spec_container=[]
+        A_phot_container=[]
+        A_mass_container=[]
+        for bin_counter, bin_id in enumerate(self.st.keys()):
+            A_spec_container.append(self.Model[bin_id]['spec'])
+            A_phot_container.append(self.Model[bin_id]['phot'])
+            A_mass_container.append(self.Model[bin_id]['stellar_mass'])
+        A_spec_container=np.asarray(A_spec_container)
+        A_phot_container=np.asarray(A_phot_container)
+        A_mass_container=np.asarray(A_mass_container)
+
+        A_spec_reduced=np.transpose((A_spec_container[:,:,:,:, self.fcc]*1.0).reshape((len(self.resolved_ids),
+                                    (self.xN-1)*(self.yN-1), self.AGE.shape[0],self.fcc.sum())), axes=(2, 0, 1, 3))
+        A_phot_reduced = np.transpose((A_phot_container*1.0).reshape((len(self.resolved_ids),(self.xN-1)*(self.yN-1),
+                        self.AGE.shape[0],len(self.bands))), axes=(2, 3, 0, 1))
+
+        data_s = self.st['bin_1'].scif[self.fcc]*1.0
+        stdf_s = 1.0/self.st['bin_1'].sivarf[self.fcc]*1.0
+
+        data_p_res = []
+        stdf_p_res = []
+        iloc_res=[]
+        iloc_global=[]
+        for bin_counter, bin_id in enumerate(self.st.keys()):
+            for iband, band in enumerate(self.bands):
+                if include_global and band in global_bands:
+                    if bin_counter==0:
+                        iloc_global.append(iband)
+                    continue
+                else:
+                    if bin_counter==0:
+                        iloc_res.append(iband)
+                    data_p_res.append(self.ref_phot_dict[band][bin_id]['flam'])
+                    stdf_p_res.append(self.ref_phot_dict[band][bin_id]['eflam'])
+        data_p_res = np.asarray(data_p_res)
+        stdf_p_res = np.asarray(stdf_p_res)
+
+        normal_phot = 1.0/np.mean(stdf_p_res)
+        self.normal_phot = normal_phot
+
+        data_p_global = []
+        stdf_p_global = []
+        if include_global:
+            for band in self.bands:
+                if band in global_bands:
+                    data_p_global.append(self.ref_phot_dict[band]['global']['flam'])
+                    stdf_p_global.append(self.ref_phot_dict[band]['global']['eflam'])
+
+        data_p_global = np.asarray(data_p_global)
+        stdf_p_global = np.asarray(stdf_p_global)
+
+        sh_A_bg_reduced=shared(self.st['bin_1'].A_bg[:,self.fcc]*1.0)
+
+        A_spec_reduced_flatten=np.transpose(A_spec_reduced,axes=[1,0,2,3]).reshape((len(self.resolved_ids),
+                                        self.AGE.shape[0]*(self.xN-1)*(self.yN-1),self.fcc.sum()))
+        sh_A_spec_reduced=[]
+        sh_A_spec_idx=[]
+        for ii in range(len(self.resolved_ids)):
+            ind=np.argwhere(A_spec_container[ii][0,0,0,self.fcc]!=0).flatten()
+            sh_A_spec_idx.append(ind)
+            red_temp_arr=[]
+            for jj in range(A_spec_reduced_flatten.shape[1]):
+                red_temp_arr.append(A_spec_reduced_flatten[ii,jj][ind]*1.0)
+            red_temp_arr=np.asarray(red_temp_arr)
+            sh_A_spec_reduced.append(shared(red_temp_arr))
+
+        sh_A_phot=shared(normal_phot*A_phot_reduced[:, iloc_res,:, :].reshape((self.AGE.shape[0],len(iloc_res),len(self.resolved_ids),(self.xN-1)*(self.yN-1))))
+        sh_A_phot_ir=shared(normal_phot*A_phot_reduced[:, iloc_global,:, :].reshape((self.AGE.shape[0],len(iloc_global),len(self.resolved_ids),(self.xN-1)*(self.yN-1))))
+
+        contamf=[]
+        for beam in self.st['bin_1'].beams:
+            contamf.extend(beam.contamf)
+        contamf=np.asarray(contamf)
+        sh_contamf=shared(contamf[self.fcc]*1.0)
+
+        N=self.AGE.shape[0] # Number of templates
+        M=len(self.resolved_ids) # Number of bins
+        P=int(len(self.bands)-len(global_bands)) #Number of photometric bands
+        L=A_spec_reduced.shape[-1] # Number of grism pixels
+        NxNy=(self.xN-1)*(self.yN-1)
+        pol_sh = (len(self.resolved_ids))*(up_pol-low_pol)
+        Nbg=self.st['bin_1'].N
+
+        sh_stdf_s=shared(stdf_s*1.0)
+        sh_data_s=shared(data_s*1.0)
+        sh_stdf_p=shared(normal_phot*stdf_p_res.T.flatten()[:,None]*np.ones((P*M, NxNy)))
+        sh_data_p=shared(normal_phot*data_p_res.T.flatten()[:,None]*np.ones((P*M, NxNy)))
+        sh_flam=shared(normal_phot*data_p_global*1.0)
+        sh_eflam=shared(normal_phot*stdf_p_global*1.0)
+
+        flat_flam=np.zeros((len(self.resolved_ids),self.st['bin_1'].scif.shape[0]))
+        for ii ,bin_id in enumerate(self.st.keys()):
+            i0=0
+            for ib, beam in enumerate(self.st[bin_id].beams):
+                beam.kernel = self.master_kernel[bin_id][ib] * 1.0
+                beam.kernel *= self.ref_phot_dict[self.bands[0]]['global']['flam']
+                beam._build_model()
+                d_px=int(beam.sh[0]*beam.sh[1])
+                flat_flam[ii,i0:i0+d_px]=beam.compute_model()
+                i0+=d_px
+        xpf=[]
+        for beam in self.st['bin_1'].beams:
+            xpf.append(np.ones(beam.sh[0])[:,None]*(beam.wave-1e4)[None,:]/1e4)
+        xpf=np.asarray(xpf).flatten()
+        A_poly=[(xpf**order)[None,:]*flat_flam for order in np.arange(low_pol,up_pol)]
+        A_poly=np.asarray(A_poly)
+        sh_A_poly_reduced=shared(A_poly[:,:,self.fcc].reshape(((len(self.resolved_ids))*(up_pol-low_pol),self.fcc.sum())))
+
+        dt = self.AGE_width*1.0
+        A_mass_interp=nd.gaussian_filter(np.median(A_mass_container.reshape((len(self.resolved_ids),
+                                                    (self.yN-1)*(self.xN-1),self.AGE.shape[0])),
+                                                   axis=1),sigma=5.0).T
+        sh_dt = shared(((dt[:,None]/A_mass_interp)/(dt[:,None]/A_mass_interp).max(axis=0)[None,:]))
+
+        self.pymc3_model = pm.Model()
+
+        if sfh_prior=='linear_ar2':
+            with self.pymc3_model:
+                BoundAR = pm.Bound(pm.AR, lower=tt.zeros((N, M)))
+                rho=[2.0,-1.0]
+                sfr = BoundAR('sfr', rho=rho,tau=tau,shape=(N, M))
+        elif sfh_prior=='log_ar2':
+            with self.pymc3_model:
+                rho=[2.0,-1.0]
+                lsfr = pm.AR('lsfr', rho=rho, tau=tau, shape=(N, M))
+                sfr = pm.Deterministic('sfr', tt.power(10, lsfr))
+        elif sfh_prior=='linear_ar1':
+            with self.pymc3_model:
+                BoundAR1 = pm.Bound(pm.AR1, lower=tt.zeros(N, M))
+                sfr = BoundAR1('sfr', k=k, tau_e=tau, shape=(N, M))
+        elif sfh_prior=='log_ar1':
+            with self.pymc3_model:
+                lsfr = pm.AR1('lsfr', k=k, tau_e=tau, shape=(N, M))
+                sfr = pm.Deterministic('sfr', tt.power(10, lsfr))
+        else:
+            print('#####################')
+            print('#####################')
+            print('#####################')
+            print('SFH prior not found! Current options: \n')
+            print('linear_ar2: AR(2) \n')
+            print('log_ar2: AR(2) in log space \n')
+            print('linear_ar1: AR(1) \n')
+            print('log_ar1: AR(1) in log space \n')
+            print('See Akhshik et. al. (2020): https://arxiv.org/pdf/2008.02276.pdf')
+            return None
+
+        with self.pymc3_model:
+            BoundNormal=pm.Bound(pm.Normal,lower=tt.zeros(M))
+            x=pm.Deterministic('x', sfr*sh_dt)
+
+            alpha = pm.Gamma('alpha', alpha=(NxNy-1)**2, beta=NxNy-1)
+            dir_a = pm.Beta('dir_a', tt.ones((M,NxNy)), alpha*tt.ones((M,NxNy)), shape=(M,NxNy))
+            w = pm.Deterministic('w', stick_breaking(dir_a, M))
+
+            contam_scale=pm.Normal('contam_scale', mu=0.0, sd=1.0)
+            bg_scale = pm.Normal('bg_scale', mu=0.0, sd=1.0, shape=(Nbg))
+            px = pm.Normal('px', mu=0.0, sd=1.0, shape=(pol_sh))
+            pw = BoundNormal('pw',mu=1.0,sd=0.1,shape=(M,))
+            scale_x = x.dimshuffle(0,1,'x')*w.dimshuffle('x',0,1)
+
+            est_model_spec = tt.zeros(L)
+            for ii in range(M):
+                tmp=tt.zeros_like(est_model_spec)
+                tmp=tt.set_subtensor(tmp[(sh_A_spec_idx[ii])],
+                                tt.tensordot(tt.flatten(scale_x[:,ii]),sh_A_spec_reduced[ii],axes=[[0],[0]]))
+                est_model_spec+=tmp
+
+            est_model_poly = tt.tensordot(px,sh_A_poly_reduced, axes=[[0],[0]])
+            est_model_others = contam_scale*sh_contamf+tt.tensordot(bg_scale, sh_A_bg_reduced,axes=[[0],[0]])
+            full_model = est_model_spec +est_model_poly + est_model_others
+
+            est_model_phot=tt.zeros((P, M, NxNy))
+            for ii in range(M):
+                est_model_phot = tt.set_subtensor(est_model_phot[:, ii],pw[ii]*tt.tensordot(x.T[ii],
+                                                sh_A_phot[:, :, ii],axes=[[0],[0]]))
+
+            comps_phot = pm.Normal.dist(mu=est_model_phot.reshape((P*M,NxNy)), sd=sh_stdf_p, shape=(P*M,NxNy))
+
+            est_model_phot_ir=tt.zeros(len(iloc_global))
+            for ii in range(M):
+                est_model_phot_ir+=pw[ii]*tt.tensordot(x[:,ii].dimshuffle(0,'x')*w[ii].dimshuffle('x',0),
+                                                    sh_A_phot_ir[:,:,ii,:],axes=[[0,1],[0,2]])
+
+            Phot_obs=pm.Mixture('Phot_obs',w=(w.dimshuffle('x',0,1)*tt.ones((P,M,NxNy))).reshape((P*M,NxNy)),
+                                comp_dists=comps_phot, observed=sh_data_p, shape=(P*M))
+            Spec_obs=pm.Normal('Spec_obs',mu=full_model,sd=sh_stdf_s,
+                                      observed=sh_data_s, shape=(L,))
+            Phot_obs_ir=pm.Normal('Phot_obs_ir',mu=est_model_phot_ir,
+                                   sd=sh_eflam,observed=sh_flam)
+
+    def make_joint_models(self, phot_prior_dict, weights=None,
+                                  PCA_keys=['logzsol', 'dust2'], PCA_nbox=[3, 4],
+                                  Nbox=15, make_PCA_plot=True, save_data=True):
+        """
+        TBD
+        """
+        import fsps
+
+        theta_labels=list(phot_prior_dict.keys())
+        if weights is None:
+            weights = np.ones_like(phot_prior_dict[theta_labels[0]])
+
+        xN, yN=PCA_nbox
+        xN+=1
+        yN+=1
+        self.xN=xN
+        self.yN=yN
+
+        cosmo = FlatLambdaCDM(H0=70.0 * u.km/u.s/u.Mpc, Om0=0.3)
+        dL = cosmo.luminosity_distance(self.z).to(u.cm).value
+        to_flamm=(3.8270e33/(4*np.pi*(dL**2)))
+
+        sp_c = fsps.StellarPopulation(imf_type=1, logzsol=0, zcontinuous=1.0,
+                                      dust_type=4,dust_index=0,
+                                      dust1=0.5, dust2=0.3)
+
+        wl, spec = sp_c.get_spectrum(tage=0.0, peraa=True)
+
+        AGE = []
+        SPEC = []
+        STELLAR_MASS = []
+        for ll in range(sp_c.log_age.shape[0]):
+            if 10 ** sp_c.log_age[ll] / 1e9 > cosmo.age(self.z).value or 10 ** sp_c.log_age[ll] / 1e9 <= 0.001:
+                continue
+            AGE.append(10 ** sp_c.log_age[ll] / 1e9)
+            SPEC.append(spec[ll])
+            STELLAR_MASS.append(sp_c.stellar_mass[ll])
+        WL = wl * 1.0
+        AGE = np.asarray(AGE)
+        SPEC = np.asarray(SPEC)
+        STELLAR_MASS = np.asarray(STELLAR_MASS)
+        AGE_edge=[1.08e-3]
+        AGE_edge.extend((0.5*(AGE[1:]+AGE[:-1])).tolist())
+        AGE_edge.append(cosmo.age(self.z).value)
+        AGE_edge=np.asarray(AGE_edge)
+
+        self.AGE=AGE
+        self.AGE_edge=AGE_edge
+        self.AGE_width = (AGE_edge[1:]-AGE_edge[:-1])
+
         self.Model={}
         for bin_counter, id in enumerate(self.resolved_ids):
             id_key = 'bin_{0}'.format(bin_counter+1)
@@ -361,6 +661,7 @@ class ResolvedModel(Photometry):
 
                     for lbl in theta_labels:
                         draws_dict[lbl][ind_mg, ind_dg]=phot_prior_dict[lbl][inbox][ind_draws]*1.0
+                        self.Model[id_key][lbl]=draws_dict[lbl]
 
                     if make_PCA_plot:
                         plt.scatter(phot_prior_dict[PCA_keys[0]][inbox][ind_draws] * 1.0,
@@ -417,6 +718,8 @@ class ResolvedModel(Photometry):
                             A_spec_tmp = np.zeros((Nbox, AGE.shape[0], self.st[id_key].scif.shape[0]))
                             A_mass_tmp = np.zeros((Nbox, AGE.shape[0]))
                             A_phot_tmp = np.zeros((Nbox, AGE.shape[0], len(self.bands)))
+                            A_fsps_tmp = []
+
 
                         temp_holder = []
                         temp_sm_holder = []
@@ -440,6 +743,7 @@ class ResolvedModel(Photometry):
                         fsps_templates = np.asarray(temp_holder)
                         stellar_masses = np.asarray(temp_sm_holder)
                         A_mass_tmp[iiter] = stellar_masses
+                        A_fsps_tmp.append(fsps_templates)
 
                         # Create spectroscopy
                         for ii in range(AGE.shape[0]):
@@ -463,8 +767,10 @@ class ResolvedModel(Photometry):
                     A_spec[ind_mg, ind_dg] = np.median(A_spec_tmp, axis=0) * 1.0
                     A_phot[ind_mg, ind_dg] = np.median(A_phot_tmp, axis=0) * 1.0
                     A_mass[ind_mg, ind_dg] = np.median(A_mass_tmp, axis=0) * 1.0
+
             self.Model[id_key]['spec']=A_spec*1.0
             self.Model[id_key]['phot']=A_phot*1.0
             self.Model[id_key]['stellar_mass']=A_mass*1.0
+            self.Model[id_key]['fsps']=np.median(np.asarray(A_fsps_tmp),axis=0)
         if save_data:
-            hkl.dump(self.Model, self.im_root+'Model.hkl', mode='w')
+            hkl.dump(self.Model, self.im_root+'Model.hkl', mode='w', compression='lzf')

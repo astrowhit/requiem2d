@@ -1,4 +1,5 @@
 import numpy as np
+import theano.tensor as tt
 
 def wquantile(data, weights, quantile):
     # Code from wquantile package
@@ -9,3 +10,8 @@ def wquantile(data, weights, quantile):
     Sn = np.cumsum(sorted_weights)
     Pn = (Sn-0.5*sorted_weights)/Sn[-1]
     return np.interp(quantile, Pn, sorted_data)
+
+def stick_breaking(beta, M):
+    portion_remaining = beta*tt.concatenate([tt.ones((M,1)),tt.cumprod(1.0-beta,axis=1)[:,:-1]],axis=1)
+    portion_remaining=portion_remaining/tt.sum(portion_remaining, axis=1, keepdims=True)
+    return portion_remaining
