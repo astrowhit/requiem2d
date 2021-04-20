@@ -345,7 +345,6 @@ class ResolvedModel(Photometry):
         else:
             self.ppc=hkl.load(path_to_ppc)
 
-
     def load_joint_models(self, phot_prior_dict, weights, path=None):
         """
         TBD
