@@ -17,17 +17,20 @@ import scipy.ndimage as nd
 import pymc3 as pm
 import theano.tensor as tt
 from theano import shared
+import sep
 
 
 
 class Photometry(object):
-    def __init__(self, id, global_photometry, im_root, region_file=None,
+    def __init__(self, id, RA, DEC, global_photometry, im_root, region_file=None,
                 sci_ext=0, aper_correct_file=None):
         """
         TBD
         """
         self.global_id = id
         self.resolved_ids=[]
+        self.RA = RA
+        self.DEC = DEC
 
         self.global_phot_dict = global_photometry.copy()
         self.bands = list(global_photometry.keys())
@@ -103,13 +106,14 @@ class Photometry(object):
         TBD
         """
 
-        seg_mask = np.zeros_like(self.ref_seg, dtype=np.bool)
-        seg_mask[self.ref_seg==self.global_id]=True
-        self.resolved_seg = np.zeros_like(self.ref_seg)
 
         # Create masks using segmentation map and user provided region reg_files
         # to calculate the initial photometry for each band
         for ireg, reg in enumerate(self.regions):
+            seg_mask = np.zeros_like(self.ref_seg, dtype=np.bool)
+            seg_mask[self.ref_seg==self.global_id]=True
+            self.resolved_seg = np.zeros_like(self.ref_seg)
+
             self.resolved_ids.append(int(1e4+ireg+1))
             id_key = 'bin_{0}'.format(ireg+1)
 
@@ -136,6 +140,19 @@ class Photometry(object):
                     im = im_hdu[self.sci_ext].data*1.0
                     wht = wht_hdu[self.sci_ext].data*1.0
                     reg_mask = self.regions.get_filter(im_hdu[self.sci_ext].header)[ireg].mask(im.shape)
+
+                    sep_im = im_hdu[self.sci_ext].data.byteswap().newbyteorder()*1.0
+                    bkg = sep.Background(sep_im, bh=50, bw=50)
+                    if bkg.globalrms>0.001:
+                        _cat, _seg_master = sep.extract(sep_im-bkg, 3, err=bkg.globalrms, segmentation_map=True)
+                    else:
+                        _cat, _seg_master = sep.extract(sep_im-bkg, 3, err=0.001, segmentation_map=True)
+                    _wcs = pywcs.WCS(im_hdu[self.sci_ext].header)
+                    xc, yc = _wcs.all_world2pix(self.RA, self.DEC, 0)
+                    id_ = _seg_master[int(yc), int(xc)]*1
+                    if id_!=0:
+                        seg_mask[(_seg_master!=id_) & (_seg_master!=0)]=False
+
                     im_hdu.close()
                     wht_hdu.close()
 
@@ -200,7 +217,7 @@ class Photometry(object):
 
 
 class ResolvedModel(Photometry):
-    def __init__(self,  z, grism_flts, id, global_photometry, im_root, region_file,
+    def __init__(self,  z, grism_flts, id, RA, DEC, global_photometry, im_root, region_file,
                 sci_ext=0, aper_correct_file=None, MW_EBV=0.0001, size=40, fcontam=0.1,
                  gname='res_model', remove_grism_contam=True):
         """
@@ -208,7 +225,7 @@ class ResolvedModel(Photometry):
         """
 
         # Make photometric catalogs
-        Photometry.__init__(self, id, global_photometry, im_root, region_file,
+        Photometry.__init__(self, id, RA, DEC, global_photometry, im_root, region_file,
                                 sci_ext, aper_correct_file)
 
         # Initiate FLT containter
@@ -242,11 +259,13 @@ class ResolvedModel(Photometry):
                                              kernel='point',usewcs=False,pixfrac=0.33, scale=1.0)
             hdu.writeto(self.im_root+'{0}_{1:05d}.stack.fits'.format(self.gname, id), overwrite=True)
             plt.close()
-
-            self.st[id_key]=StackFitter(files=self.im_root+'{0}_{1:05d}.stack.fits'.format(self.gname, id),
-                                      group_name=self.gname, sys_err=0.01, mask_min=0.1,
+            try:
+                self.st[id_key]=StackFitter(files=self.im_root+'{0}_{1:05d}.stack.fits'.format(self.gname, id),
+                                      group_name=self.gname, sys_err=0.0, mask_min=0.1,
                                       fit_stacks=False, fcontam=self.fcontam, extensions=None,
                                       min_ivar=0.01, overlap_threshold=3, verbose=True,chi2_threshold=0.0)
+            except:
+                continue
 
             beam=self.st[id_key].beams[0]
             self.st[id_key].MW_EBV=self.MW_EBV
@@ -299,11 +318,33 @@ class ResolvedModel(Photometry):
             trace = pm.sample(tune=tune, draws=draws, n_init=200000, chains=chains,
              cores=4, init=method, target_accept=target_accept)
         self.trace = trace
+
         self.trace_values = {}
         for ky in self.trace.varnames:
             self.trace_values[ky] = self.trace.get_values(ky)
+
+        self.ppc = pm.sample_posterior_predictive(self.trace, model=self.pymc3_model)
+
         if save_trace:
             hkl.dump(self.trace_values, self.im_root+'trace.hkl', mode='w', compression='lzf')
+            hkl.dump(self.ppc, self.im_root+'ppc.hkl', mode='w', compression='lzf')
+            pm.summary(self.trace).to_csv(self.im_root+'trace_summary.dat', sep=' ', mode='w')
+
+
+    def load_fit(self, path_to_trace=None, path_to_ppc=None):
+        """
+        TBD
+        """
+        if path_to_trace is None:
+            self.trace_values=hkl.load(self.im_root+'trace.hkl')
+        else:
+            self.trace_values=hkl.load(path_to_trace)
+
+        if path_to_ppc is None:
+            self.ppc=hkl.load(self.im_root+'ppc.hkl')
+        else:
+            self.ppc=hkl.load(path_to_ppc)
+
 
     def load_joint_models(self, phot_prior_dict, weights, path=None):
         """
@@ -361,7 +402,7 @@ class ResolvedModel(Photometry):
 
     def init_fitter(self, sfh_prior='linear_ar2', k=1, tau=400,
                     include_global=True, global_bands=['IRAC1', 'IRAC2'],
-                    low_pol=0, up_pol=2):
+                    low_pol=0, up_pol=2, regularize_old=False):
         """
         TBD
         """
@@ -379,9 +420,9 @@ class ResolvedModel(Photometry):
         A_phot_container=np.asarray(A_phot_container)
         A_mass_container=np.asarray(A_mass_container)
 
-        A_spec_reduced=np.transpose((A_spec_container[:,:,:,:, self.fcc]*1.0).reshape((len(self.resolved_ids),
+        A_spec_reduced=np.transpose((A_spec_container[:,:,:,:, self.fcc]*1.0).reshape((len(list(self.st.keys())),
                                     (self.xN-1)*(self.yN-1), self.AGE.shape[0],self.fcc.sum())), axes=(2, 0, 1, 3))
-        A_phot_reduced = np.transpose((A_phot_container*1.0).reshape((len(self.resolved_ids),(self.xN-1)*(self.yN-1),
+        A_phot_reduced = np.transpose((A_phot_container*1.0).reshape((len(list(self.st.keys())),(self.xN-1)*(self.yN-1),
                         self.AGE.shape[0],len(self.bands))), axes=(2, 3, 0, 1))
 
         data_s = self.st['bin_1'].scif[self.fcc]*1.0
@@ -421,11 +462,11 @@ class ResolvedModel(Photometry):
 
         sh_A_bg_reduced=shared(self.st['bin_1'].A_bg[:,self.fcc]*1.0)
 
-        A_spec_reduced_flatten=np.transpose(A_spec_reduced,axes=[1,0,2,3]).reshape((len(self.resolved_ids),
+        A_spec_reduced_flatten=np.transpose(A_spec_reduced,axes=[1,0,2,3]).reshape((len(list(self.st.keys())),
                                         self.AGE.shape[0]*(self.xN-1)*(self.yN-1),self.fcc.sum()))
         sh_A_spec_reduced=[]
         sh_A_spec_idx=[]
-        for ii in range(len(self.resolved_ids)):
+        for ii in range(len(list(self.st.keys()))):
             ind=np.argwhere(A_spec_container[ii][0,0,0,self.fcc]!=0).flatten()
             sh_A_spec_idx.append(ind)
             red_temp_arr=[]
@@ -434,8 +475,8 @@ class ResolvedModel(Photometry):
             red_temp_arr=np.asarray(red_temp_arr)
             sh_A_spec_reduced.append(shared(red_temp_arr))
 
-        sh_A_phot=shared(normal_phot*A_phot_reduced[:, iloc_res,:, :].reshape((self.AGE.shape[0],len(iloc_res),len(self.resolved_ids),(self.xN-1)*(self.yN-1))))
-        sh_A_phot_ir=shared(normal_phot*A_phot_reduced[:, iloc_global,:, :].reshape((self.AGE.shape[0],len(iloc_global),len(self.resolved_ids),(self.xN-1)*(self.yN-1))))
+        sh_A_phot=shared(normal_phot*A_phot_reduced[:, iloc_res,:, :].reshape((self.AGE.shape[0],len(iloc_res),len(list(self.st.keys())),(self.xN-1)*(self.yN-1))))
+        sh_A_phot_ir=shared(normal_phot*A_phot_reduced[:, iloc_global,:, :].reshape((self.AGE.shape[0],len(iloc_global),len(list(self.st.keys())),(self.xN-1)*(self.yN-1))))
 
         contamf=[]
         for beam in self.st['bin_1'].beams:
@@ -444,11 +485,11 @@ class ResolvedModel(Photometry):
         sh_contamf=shared(contamf[self.fcc]*1.0)
 
         N=self.AGE.shape[0] # Number of templates
-        M=len(self.resolved_ids) # Number of bins
+        M=len(list(self.st.keys())) # Number of bins
         P=int(len(self.bands)-len(global_bands)) #Number of photometric bands
         L=A_spec_reduced.shape[-1] # Number of grism pixels
         NxNy=(self.xN-1)*(self.yN-1)
-        pol_sh = (len(self.resolved_ids))*(up_pol-low_pol)
+        pol_sh = (len(list(self.st.keys())))*(up_pol-low_pol)
         Nbg=self.st['bin_1'].N
 
         sh_stdf_s=shared(stdf_s*1.0)
@@ -458,12 +499,12 @@ class ResolvedModel(Photometry):
         sh_flam=shared(normal_phot*data_p_global*1.0)
         sh_eflam=shared(normal_phot*stdf_p_global*1.0)
 
-        flat_flam=np.zeros((len(self.resolved_ids),self.st['bin_1'].scif.shape[0]))
+        flat_flam=np.zeros((len(list(self.st.keys())),self.st['bin_1'].scif.shape[0]))
         for ii ,bin_id in enumerate(self.st.keys()):
             i0=0
             for ib, beam in enumerate(self.st[bin_id].beams):
                 beam.kernel = self.master_kernel[bin_id][ib] * 1.0
-                beam.kernel *= self.ref_phot_dict[self.bands[0]]['global']['flam']
+                beam.kernel *= self.ref_phot_dict[self.bands[0]][bin_id]['flam']
                 beam._build_model()
                 d_px=int(beam.sh[0]*beam.sh[1])
                 flat_flam[ii,i0:i0+d_px]=beam.compute_model()
@@ -474,13 +515,14 @@ class ResolvedModel(Photometry):
         xpf=np.asarray(xpf).flatten()
         A_poly=[(xpf**order)[None,:]*flat_flam for order in np.arange(low_pol,up_pol)]
         A_poly=np.asarray(A_poly)
-        sh_A_poly_reduced=shared(A_poly[:,:,self.fcc].reshape(((len(self.resolved_ids))*(up_pol-low_pol),self.fcc.sum())))
+        sh_A_poly_reduced=shared(A_poly[:,:,self.fcc].reshape(((len(list(self.st.keys())))*(up_pol-low_pol),self.fcc.sum())))
 
         dt = self.AGE_width*1.0
-        A_mass_interp=nd.gaussian_filter(np.median(A_mass_container.reshape((len(self.resolved_ids),
+        A_mass_interp=nd.gaussian_filter(np.median(A_mass_container.reshape((len(list(self.st.keys())),
                                                     (self.yN-1)*(self.xN-1),self.AGE.shape[0])),
                                                    axis=1),sigma=5.0).T
         sh_dt = shared(((dt[:,None]/A_mass_interp)/(dt[:,None]/A_mass_interp).max(axis=0)[None,:]))
+        sh_reg=shared(np.exp(-self.AGE/5)[:,None]*np.ones((N,M)))
 
         self.pymc3_model = pm.Model()
 
@@ -488,20 +530,22 @@ class ResolvedModel(Photometry):
             with self.pymc3_model:
                 BoundAR = pm.Bound(pm.AR, lower=tt.zeros((N, M)))
                 rho=[2.0,-1.0]
-                sfr = BoundAR('sfr', rho=rho,tau=tau,shape=(N, M))
+                sfr0 = BoundAR('sfr0', rho=rho,tau=tau,shape=(N, M))
         elif sfh_prior=='log_ar2':
             with self.pymc3_model:
                 rho=[2.0,-1.0]
                 lsfr = pm.AR('lsfr', rho=rho, tau=tau, shape=(N, M))
-                sfr = pm.Deterministic('sfr', tt.power(10, lsfr))
+                sfr0 = pm.Deterministic('sfr0', tt.power(10, lsfr))
         elif sfh_prior=='linear_ar1':
             with self.pymc3_model:
-                BoundAR1 = pm.Bound(pm.AR1, lower=tt.zeros(N, M))
-                sfr = BoundAR1('sfr', k=k, tau_e=tau, shape=(N, M))
+                BoundAR = pm.Bound(pm.AR, lower=tt.zeros((N, M)))
+                rho=[k]
+                sfr0 = BoundAR('sfr0',rho=rho,tau=tau,shape=(N, M))
         elif sfh_prior=='log_ar1':
             with self.pymc3_model:
-                lsfr = pm.AR1('lsfr', k=k, tau_e=tau, shape=(N, M))
-                sfr = pm.Deterministic('sfr', tt.power(10, lsfr))
+                rho=[k]
+                lsfr = pm.AR('lsfr', rho=rho,tau=tau,shape=(N, M))
+                sfr0 = pm.Deterministic('sfr0', tt.power(10, lsfr))
         else:
             print('#####################')
             print('#####################')
@@ -514,12 +558,20 @@ class ResolvedModel(Photometry):
             print('See Akhshik et. al. (2020): https://arxiv.org/pdf/2008.02276.pdf')
             return None
 
+        if regularize_old:
+            with self.pymc3_model:
+                sfr=pm.Deterministic('sfr',sfr0*sh_reg)
+        else:
+            with self.pymc3_model:
+                sfr=pm.Deterministic('sfr',sfr0*1.0)
+
         with self.pymc3_model:
-            BoundNormal=pm.Bound(pm.Normal,lower=tt.zeros(M))
             x=pm.Deterministic('x', sfr*sh_dt)
 
-            alpha = pm.Gamma('alpha', alpha=(NxNy-1)**2, beta=NxNy-1)
-            dir_a = pm.Beta('dir_a', tt.ones((M,NxNy)), alpha*tt.ones((M,NxNy)), shape=(M,NxNy))
+            BoundNormal=pm.Bound(pm.Normal,lower=tt.zeros(M))
+
+            alpha = pm.Gamma('alpha', alpha=(NxNy-1)**2, beta=(NxNy-1), shape=(M,))
+            dir_a = pm.Beta('dir_a', tt.ones((M,NxNy)), alpha.dimshuffle(0,'x')*tt.ones((M,NxNy)), shape=(M,NxNy))
             w = pm.Deterministic('w', stick_breaking(dir_a, M))
 
             contam_scale=pm.Normal('contam_scale', mu=0.0, sd=1.0)
@@ -543,7 +595,6 @@ class ResolvedModel(Photometry):
             for ii in range(M):
                 est_model_phot = tt.set_subtensor(est_model_phot[:, ii],pw[ii]*tt.tensordot(x.T[ii],
                                                 sh_A_phot[:, :, ii],axes=[[0],[0]]))
-
             comps_phot = pm.Normal.dist(mu=est_model_phot.reshape((P*M,NxNy)), sd=sh_stdf_p, shape=(P*M,NxNy))
 
             est_model_phot_ir=tt.zeros(len(iloc_global))
@@ -609,12 +660,11 @@ class ResolvedModel(Photometry):
         self.AGE_width = (AGE_edge[1:]-AGE_edge[:-1])
 
         self.Model={}
-        for bin_counter, id in enumerate(self.resolved_ids):
-            id_key = 'bin_{0}'.format(bin_counter+1)
+        for bin_counter, id_key in enumerate(list(self.st.keys())):
             self.Model[id_key]={}
             for ib, beam in enumerate(self.st[id_key].beams):
                 beam.kernel = self.master_kernel[id_key][ib] * 1.0
-                beam.kernel *= self.ref_phot_dict[self.bands[0]]['global']['flam']
+                beam.kernel *= self.ref_phot_dict[self.bands[0]][id_key]['flam']
                 beam._build_model()
 
             X_grid = np.linspace(wquantile(phot_prior_dict[PCA_keys[0]], weights, 0.0014),
