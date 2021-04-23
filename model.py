@@ -17,9 +17,6 @@ import scipy.ndimage as nd
 import pymc3 as pm
 import theano.tensor as tt
 from theano import shared
-import sep
-
-
 
 class Photometry(object):
     def __init__(self, id, RA, DEC, global_photometry, im_root, region_file=None,
@@ -140,21 +137,6 @@ class Photometry(object):
                     im = im_hdu[self.sci_ext].data*1.0
                     wht = wht_hdu[self.sci_ext].data*1.0
                     reg_mask = self.regions.get_filter(im_hdu[self.sci_ext].header)[ireg].mask(im.shape)
-
-                    sep_im = im_hdu[self.sci_ext].data.byteswap().newbyteorder()*1.0
-                    bkg = sep.Background(sep_im, bh=50, bw=50)
-                    if bkg.globalrms>0.001:
-                        _cat, _seg_master = sep.extract(sep_im-bkg, 3, err=bkg.globalrms, segmentation_map=True)
-                    else:
-                        _cat, _seg_master = sep.extract(sep_im-bkg, 3, err=0.001, segmentation_map=True)
-                    _wcs = pywcs.WCS(im_hdu[self.sci_ext].header)
-                    xc, yc = _wcs.all_world2pix(self.RA, self.DEC, 0)
-                    id_ = _seg_master[int(yc), int(xc)]*1
-                    if id_!=0:
-                        seg_mask[(_seg_master!=id_) & (_seg_master!=0)]=False
-
-                    im_hdu.close()
-                    wht_hdu.close()
 
                 mask = reg_mask & seg_mask
                 flam_ = im[mask].sum()
@@ -401,7 +383,7 @@ class ResolvedModel(Photometry):
 
     def init_fitter(self, sfh_prior='linear_ar2', k=1, tau=400,
                     include_global=True, global_bands=['IRAC1', 'IRAC2'],
-                    low_pol=0, up_pol=2, regularize_old=False):
+                    low_pol=0, up_pol=2, regularize_old=False, mixture_photometry=True):
         """
         TBD
         """
@@ -433,10 +415,9 @@ class ResolvedModel(Photometry):
         iloc_global=[]
         for bin_counter, bin_id in enumerate(self.st.keys()):
             for iband, band in enumerate(self.bands):
-                if include_global and band in global_bands:
+                if band in global_bands:
                     if bin_counter==0:
                         iloc_global.append(iband)
-                    continue
                 else:
                     if bin_counter==0:
                         iloc_res.append(iband)
@@ -445,7 +426,7 @@ class ResolvedModel(Photometry):
         data_p_res = np.asarray(data_p_res)
         stdf_p_res = np.asarray(stdf_p_res)
 
-        normal_phot = 1.0/np.mean(stdf_p_res)
+        normal_phot = 1.0/np.mean(data_p_res)
         self.normal_phot = normal_phot
 
         data_p_global = []
@@ -483,18 +464,23 @@ class ResolvedModel(Photometry):
         contamf=np.asarray(contamf)
         sh_contamf=shared(contamf[self.fcc]*1.0)
 
-        N=self.AGE.shape[0] # Number of templates
-        M=len(list(self.st.keys())) # Number of bins
-        P=int(len(self.bands)-len(global_bands)) #Number of photometric bands
-        L=A_spec_reduced.shape[-1] # Number of grism pixels
+        N=self.AGE.shape[0]
+        M=len(list(self.st.keys()))
+        P=int(len(self.bands)-len(global_bands))
+        L=A_spec_reduced.shape[-1]
         NxNy=(self.xN-1)*(self.yN-1)
         pol_sh = (len(list(self.st.keys())))*(up_pol-low_pol)
         Nbg=self.st['bin_1'].N
 
+        self.N = N # Number of sps templates
+        self.M = M # Number of analyzed resolved bins
+        self.P = P # Number of resolved photometric bands
+        self.L = L # Number of grism pixels
+
         sh_stdf_s=shared(stdf_s*1.0)
         sh_data_s=shared(data_s*1.0)
-        sh_stdf_p=shared(normal_phot*stdf_p_res.T.flatten()[:,None]*np.ones((P*M, NxNy)))
-        sh_data_p=shared(normal_phot*data_p_res.T.flatten()[:,None]*np.ones((P*M, NxNy)))
+        sh_stdf_p=shared(normal_phot*stdf_p_res.reshape((M,P)).T.flatten()[:,None]*np.ones((P*M, NxNy)))
+        sh_data_p=shared(normal_phot*data_p_res.reshape((M,P)).T.flatten())
         sh_flam=shared(normal_phot*data_p_global*1.0)
         sh_eflam=shared(normal_phot*stdf_p_global*1.0)
 
@@ -569,7 +555,7 @@ class ResolvedModel(Photometry):
 
             BoundNormal=pm.Bound(pm.Normal,lower=tt.zeros(M))
 
-            alpha = pm.Gamma('alpha', alpha=(NxNy-1)**2, beta=(NxNy-1), shape=(M,))
+            alpha = pm.Gamma('alpha', alpha=(NxNy-1), beta=1.0, shape=(M,))
             dir_a = pm.Beta('dir_a', tt.ones((M,NxNy)), alpha.dimshuffle(0,'x')*tt.ones((M,NxNy)), shape=(M,NxNy))
             w = pm.Deterministic('w', stick_breaking(dir_a, M))
 
@@ -590,23 +576,33 @@ class ResolvedModel(Photometry):
             est_model_others = contam_scale*sh_contamf+tt.tensordot(bg_scale, sh_A_bg_reduced,axes=[[0],[0]])
             full_model = est_model_spec +est_model_poly + est_model_others
 
-            est_model_phot=tt.zeros((P, M, NxNy))
-            for ii in range(M):
-                est_model_phot = tt.set_subtensor(est_model_phot[:, ii],pw[ii]*tt.tensordot(x.T[ii],
-                                                sh_A_phot[:, :, ii],axes=[[0],[0]]))
-            comps_phot = pm.Normal.dist(mu=est_model_phot.reshape((P*M,NxNy)), sd=sh_stdf_p, shape=(P*M,NxNy))
-
-            est_model_phot_ir=tt.zeros(len(iloc_global))
-            for ii in range(M):
-                est_model_phot_ir+=pw[ii]*tt.tensordot(x[:,ii].dimshuffle(0,'x')*w[ii].dimshuffle('x',0),
-                                                    sh_A_phot_ir[:,:,ii,:],axes=[[0,1],[0,2]])
-
-            Phot_obs=pm.Mixture('Phot_obs',w=(w.dimshuffle('x',0,1)*tt.ones((P,M,NxNy))).reshape((P*M,NxNy)),
-                                comp_dists=comps_phot, observed=sh_data_p, shape=(P*M))
             Spec_obs=pm.Normal('Spec_obs',mu=full_model,sd=sh_stdf_s,
                                       observed=sh_data_s, shape=(L,))
-            Phot_obs_ir=pm.Normal('Phot_obs_ir',mu=est_model_phot_ir,
-                                   sd=sh_eflam,observed=sh_flam)
+
+        if mixture_photometry:
+            with self.pymc3_model:
+                est_model_phot=tt.zeros((P, M, NxNy))
+                for ii in range(M):
+                    est_model_phot = tt.set_subtensor(est_model_phot[:, ii],pw[ii]*tt.tensordot(x.T[ii],
+                                                sh_A_phot[:, :, ii],axes=[[0],[0]]))
+                comps_phot = pm.Normal.dist(mu=est_model_phot.reshape((P*M,NxNy)), sd=sh_stdf_p, shape=(P*M,NxNy))
+                Phot_obs=pm.Mixture('Phot_obs',w=(w.dimshuffle('x',0,1)*tt.ones((P,M,NxNy))).reshape((P*M,NxNy)),
+                                    comp_dists=comps_phot, observed=sh_data_p, shape=(P*M))
+        else:
+            with self.pymc3_model:
+                est_model_phot=tt.zeros((P, M))
+                for ii in range(M):
+                    est_model_phot = tt.set_subtensor(est_model_phot[:, ii],pw[ii]*tt.tensordot(x[:,ii].dimshuffle(0,'x')*w[ii].dimshuffle('x',0),
+                                                sh_A_phot[:, :, ii],axes=[[0,1],[0,2]]))
+                Phot_obs = pm.Normal('Phot_obs',mu=tt.flatten(est_model_phot), sd=sh_stdf_p[:,0], observed=sh_data_p)
+
+        if include_global:
+            with self.pymc3_model:
+                est_model_phot_ir=tt.zeros(len(iloc_global))
+                for ii in range(M):
+                    est_model_phot_ir+=pw[ii]*tt.tensordot(x[:,ii].dimshuffle(0,'x')*w[ii].dimshuffle('x',0),
+                                                    sh_A_phot_ir[:,:,ii,:],axes=[[0,1],[0,2]])
+                Phot_obs_ir=pm.Normal('Phot_obs_ir',mu=est_model_phot_ir, sd=sh_eflam,observed=sh_flam)
 
     def make_joint_models(self, phot_prior_dict, weights=None,
                                   PCA_keys=['logzsol', 'dust2'], PCA_nbox=[3, 4],
@@ -793,6 +789,8 @@ class ResolvedModel(Photometry):
                         stellar_masses = np.asarray(temp_sm_holder)
                         A_mass_tmp[iiter] = stellar_masses
                         A_fsps_tmp.append(fsps_templates)
+                        if ind_dg==0 and ind_mg==0:
+                            A_fsps = np.zeros((xN-1, yN-1, fsps_templates.shape[0], fsps_templates.shape[1], fsps_templates.shape[2]))
 
                         # Create spectroscopy
                         for ii in range(AGE.shape[0]):
@@ -816,10 +814,11 @@ class ResolvedModel(Photometry):
                     A_spec[ind_mg, ind_dg] = np.median(A_spec_tmp, axis=0) * 1.0
                     A_phot[ind_mg, ind_dg] = np.median(A_phot_tmp, axis=0) * 1.0
                     A_mass[ind_mg, ind_dg] = np.median(A_mass_tmp, axis=0) * 1.0
+                    A_fsps[ind_mg, ind_dg] = np.median(np.asarray(A_fsps_tmp),axis=0)
 
             self.Model[id_key]['spec']=A_spec*1.0
             self.Model[id_key]['phot']=A_phot*1.0
             self.Model[id_key]['stellar_mass']=A_mass*1.0
-            self.Model[id_key]['fsps']=np.median(np.asarray(A_fsps_tmp),axis=0)
+            self.Model[id_key]['fsps']=A_fsps*1.0
         if save_data:
             hkl.dump(self.Model, self.im_root+'Model.hkl', mode='w', compression='lzf')
