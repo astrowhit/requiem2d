@@ -18,9 +18,12 @@ import pymc3 as pm
 import theano.tensor as tt
 from theano import shared
 
+LOW_PERC=0.0014
+HIGH_PERC=0.9986
+
 class Photometry(object):
-    def __init__(self, id, RA, DEC, global_photometry, im_root, region_file=None,
-                sci_ext=0, aper_correct_file=None):
+    def __init__(self, id, RA, DEC, global_photometry, global_bands, semiresolved_bands, semiresolved_bins,
+                im_root, region_file=None, sci_ext=0, aper_correct_file=None):
         """
         TBD
         """
@@ -31,7 +34,9 @@ class Photometry(object):
 
         self.global_phot_dict = global_photometry.copy()
         self.bands = list(global_photometry.keys())
-
+        self.global_bands=global_bands
+        self.semiresolved_bands = semiresolved_bands
+        self.semiresolved_bins = semiresolved_bins
         self.im_root = im_root
 
         self.ref_phot_dict={}
@@ -115,7 +120,7 @@ class Photometry(object):
             id_key = 'bin_{0}'.format(ireg+1)
 
             for iband, band in enumerate(self.bands):
-                if band[:-1]=='IRAC':
+                if band in self.global_bands or band in self.semiresolved_bands:
                     continue
                 self.ref_phot_dict[band][id_key] = {}
                 if iband == 0:
@@ -164,7 +169,7 @@ class Photometry(object):
         for ireg in range(len(self.regions)):
             id_key = 'bin_{0}'.format(ireg+1)
             for iband, band in enumerate(self.bands):
-                if band[:-1]=='IRAC':
+                if band in self.global_bands or band in self.semiresolved_bands:
                     continue
                 self.ref_phot_dict[band][id_key]['flam']*=self.phot_scale
                 self.ref_phot_dict[band][id_key]['eflam']*=self.phot_scale
@@ -174,7 +179,7 @@ class Photometry(object):
             for ireg in range(len(self.regions)):
                 id_key = 'bin_{0}'.format(ireg+1)
                 for iband, band in enumerate(self.bands):
-                    if band[:-1]=='IRAC':
+                    if band in self.global_bands or band in self.semiresolved_bands:
                         continue
                     loc = tab['bands'] == band
                     alpha = tab['alpha'][loc][0]
@@ -199,16 +204,16 @@ class Photometry(object):
 
 
 class ResolvedModel(Photometry):
-    def __init__(self,  z, grism_flts, id, RA, DEC, global_photometry, im_root, region_file,
-                sci_ext=0, aper_correct_file=None, MW_EBV=0.0001, size=40, fcontam=0.1,
+    def __init__(self,  z, grism_flts, id, RA, DEC, global_photometry, global_bands, semiresolved_bands, semiresolved_bins,
+                im_root, region_file, sci_ext=0, aper_correct_file=None, MW_EBV=0.0001, size=40, fcontam=0.1,
                  gname='res_model', remove_grism_contam=True):
         """
         TBD
         """
 
         # Make photometric catalogs
-        Photometry.__init__(self, id, RA, DEC, global_photometry, im_root, region_file,
-                                sci_ext, aper_correct_file)
+        Photometry.__init__(self, id, RA, DEC, global_photometry, global_bands, semiresolved_bands, semiresolved_bins,
+                            im_root, region_file, sci_ext, aper_correct_file)
 
         # Initiate FLT containter
         self.grp = GroupFLT(grism_files=grism_flts, direct_files=[], cpu_count=4,
@@ -382,8 +387,7 @@ class ResolvedModel(Photometry):
         self.AGE_width = (AGE_edge[1:]-AGE_edge[:-1])
 
     def init_fitter(self, sfh_prior='linear_ar2', k=1, tau=400,
-                    include_global=True, global_bands=['IRAC1', 'IRAC2'],
-                    low_pol=0, up_pol=2, regularize_old=False, mixture_photometry=True):
+                    include_global=True, low_pol=0, up_pol=2, regularize_old=False, mixture_photometry=True):
         """
         TBD
         """
@@ -412,12 +416,17 @@ class ResolvedModel(Photometry):
         data_p_res = []
         stdf_p_res = []
         iloc_res=[]
-        iloc_global=[]
+        iloc_global = []
+        iloc_semiresolved = []
+        iloc_total = []
         for bin_counter, bin_id in enumerate(self.st.keys()):
             for iband, band in enumerate(self.bands):
-                if band in global_bands:
+                if band in self.global_bands:
                     if bin_counter==0:
                         iloc_global.append(iband)
+                elif band in self.semiresolved_bands:
+                    if bin_counter==0:
+                        iloc_semiresolved.append(iband)
                 else:
                     if bin_counter==0:
                         iloc_res.append(iband)
@@ -433,12 +442,23 @@ class ResolvedModel(Photometry):
         stdf_p_global = []
         if include_global:
             for band in self.bands:
-                if band in global_bands:
+                if band in self.global_bands:
                     data_p_global.append(self.ref_phot_dict[band]['global']['flam'])
                     stdf_p_global.append(self.ref_phot_dict[band]['global']['eflam'])
 
         data_p_global = np.asarray(data_p_global)
         stdf_p_global = np.asarray(stdf_p_global)
+
+        data_p_semiresolved = []
+        stdf_p_semiresolved = []
+        if include_global:
+            for band in self.bands:
+                if band in self.semiresolved_bands:
+                    data_p_semiresolved.append(self.ref_phot_dict[band]['global']['flam'])
+                    stdf_p_semiresolved.append(self.ref_phot_dict[band]['global']['eflam'])
+
+        data_p_semiresolved = np.asarray(data_p_semiresolved)
+        stdf_p_semiresolved = np.asarray(stdf_p_semiresolved)
 
         sh_A_bg_reduced=shared(self.st['bin_1'].A_bg[:,self.fcc]*1.0)
 
@@ -457,6 +477,7 @@ class ResolvedModel(Photometry):
 
         sh_A_phot=shared(normal_phot*A_phot_reduced[:, iloc_res,:, :].reshape((self.AGE.shape[0],len(iloc_res),len(list(self.st.keys())),(self.xN-1)*(self.yN-1))))
         sh_A_phot_ir=shared(normal_phot*A_phot_reduced[:, iloc_global,:, :].reshape((self.AGE.shape[0],len(iloc_global),len(list(self.st.keys())),(self.xN-1)*(self.yN-1))))
+        sh_A_phot_semiresolved=shared(normal_phot*A_phot_reduced[:, iloc_semiresolved,:, :].reshape((self.AGE.shape[0],len(iloc_semiresolved),len(list(self.st.keys())),(self.xN-1)*(self.yN-1))))
 
         contamf=[]
         for beam in self.st['bin_1'].beams:
@@ -466,7 +487,7 @@ class ResolvedModel(Photometry):
 
         N=self.AGE.shape[0]
         M=len(list(self.st.keys()))
-        P=int(len(self.bands)-len(global_bands))
+        P=int(len(self.bands)-len(self.global_bands)-len(self.semiresolved_bands))
         L=A_spec_reduced.shape[-1]
         NxNy=(self.xN-1)*(self.yN-1)
         pol_sh = (len(list(self.st.keys())))*(up_pol-low_pol)
@@ -483,6 +504,16 @@ class ResolvedModel(Photometry):
         sh_data_p=shared(normal_phot*data_p_res.reshape((M,P)).T.flatten())
         sh_flam=shared(normal_phot*data_p_global*1.0)
         sh_eflam=shared(normal_phot*stdf_p_global*1.0)
+        sh_flam_semiresolved=shared(normal_phot*data_p_semiresolved*1.0)
+        sh_eflam_semiresolved=shared(normal_phot*stdf_p_semiresolved*1.0)
+
+        if include_global:
+            semiresolved_ind = []
+            for ii, id_key in enumerate(list(self.st.keys())):
+                if id_key in self.semiresolved_bins:
+                    semiresolved_ind.append(True)
+                else:
+                    semiresolved_ind.append(False)
 
         flat_flam=np.zeros((len(list(self.st.keys())),self.st['bin_1'].scif.shape[0]))
         for ii ,bin_id in enumerate(self.st.keys()):
@@ -602,7 +633,26 @@ class ResolvedModel(Photometry):
                 for ii in range(M):
                     est_model_phot_ir+=pw[ii]*tt.tensordot(x[:,ii].dimshuffle(0,'x')*w[ii].dimshuffle('x',0),
                                                     sh_A_phot_ir[:,:,ii,:],axes=[[0,1],[0,2]])
-                Phot_obs_ir=pm.Normal('Phot_obs_ir',mu=est_model_phot_ir, sd=sh_eflam,observed=sh_flam)
+                Phot_obs_ir=pm.Normal('Phot_obs_ir',mu=est_model_phot_ir, sd=sh_eflam, observed=sh_flam)
+
+            if len(self.semiresolved_bands)!=0:
+                with self.pymc3_model:
+                    est_model_phot_semiresolved=tt.zeros(len(iloc_semiresolved))
+                    est_model_phot_unresolved=tt.zeros(len(iloc_semiresolved))
+                    for ii in range(M):
+                        if semiresolved_ind[ii]:
+                            est_model_phot_semiresolved+=pw[ii]*tt.tensordot(x[:,ii].dimshuffle(0,'x')*w[ii].dimshuffle('x',0),
+                                                    sh_A_phot_semiresolved[:,:,ii,:],axes=[[0,1],[0,2]])
+                        else:
+                            est_model_phot_unresolved+=pw[ii]*tt.tensordot(x[:,ii].dimshuffle(0,'x')*w[ii].dimshuffle('x',0),
+                                                    sh_A_phot_semiresolved[:,:,ii,:],axes=[[0,1],[0,2]])
+
+                    Phot_obs_semiresolved=pm.Normal('Phot_obs_semiresolved',mu=est_model_phot_semiresolved,
+                                    sd=sh_eflam_semiresolved, observed=sh_flam_semiresolved)
+
+                    eps_censored = pm.HalfNormal('eps_censored', sd=1.0, shape=(len(iloc_semiresolved)))
+                    Phot_obs_unresolved = pm.Potential('Phot_obs_unresolved', upper_limit_likelihood(est_model_phot_unresolved,
+                                            eps_censored, len(iloc_semiresolved), 3*sh_eflam_semiresolved))
 
     def make_joint_models(self, phot_prior_dict, weights=None,
                                   PCA_keys=['logzsol', 'dust2'], PCA_nbox=[3, 4],
@@ -662,11 +712,11 @@ class ResolvedModel(Photometry):
                 beam.kernel *= self.ref_phot_dict[self.bands[0]][id_key]['flam']
                 beam._build_model()
 
-            X_grid = np.linspace(wquantile(phot_prior_dict[PCA_keys[0]], weights, 0.0014),
-                                wquantile(phot_prior_dict[PCA_keys[0]], weights, 0.9986),
+            X_grid = np.linspace(wquantile(phot_prior_dict[id_key][PCA_keys[0]], weights, LOW_PERC),
+                                wquantile(phot_prior_dict[id_key][PCA_keys[0]], weights, HIGH_PERC),
                                      xN)
-            Y_grid = np.linspace(wquantile(phot_prior_dict[PCA_keys[1]], weights, 0.0014),
-                                    wquantile(phot_prior_dict[PCA_keys[1]], weights, 0.9986),
+            Y_grid = np.linspace(wquantile(phot_prior_dict[id_key][PCA_keys[1]], weights, LOW_PERC),
+                                    wquantile(phot_prior_dict[id_key][PCA_keys[1]], weights, HIGH_PERC),
                                      yN)
 
             X_box_draws = np.zeros((X_grid.shape[0] - 1, Y_grid.shape[0] - 1, Nbox))
@@ -677,7 +727,7 @@ class ResolvedModel(Photometry):
 
             if make_PCA_plot:
                 plt.figure(figsize=(8, 8))
-                plt.scatter(phot_prior_dict[PCA_keys[0]], phot_prior_dict[PCA_keys[1]], color='black', s=1, alpha=0.1)
+                plt.scatter(phot_prior_dict[id_key][PCA_keys[0]], phot_prior_dict[id_key][PCA_keys[1]], color='black', s=1, alpha=0.1)
 
             for ind_mg in range(X_grid[:-1].shape[0]):
 
@@ -687,8 +737,8 @@ class ResolvedModel(Photometry):
                     dg_min = Y_grid[ind_dg] * 1.0
                     dg_max = Y_grid[ind_dg + 1] * 1.0
 
-                    inbox = (phot_prior_dict[PCA_keys[0]] >= mg_min) & (phot_prior_dict[PCA_keys[0]] < mg_max) & \
-                            (phot_prior_dict[PCA_keys[1]] >= dg_min) & (phot_prior_dict[PCA_keys[1]] < dg_max)
+                    inbox = (phot_prior_dict[id_key][PCA_keys[0]] >= mg_min) & (phot_prior_dict[id_key][PCA_keys[0]] < mg_max) & \
+                            (phot_prior_dict[id_key][PCA_keys[1]] >= dg_min) & (phot_prior_dict[id_key][PCA_keys[1]] < dg_max)
 
                     weight_inbox = weights[inbox] * 1.0
                     if (weight_inbox > 0.0).sum() > Nbox:
@@ -705,12 +755,12 @@ class ResolvedModel(Photometry):
                                                                    replace=replace, p=prob))
 
                     for lbl in theta_labels:
-                        draws_dict[lbl][ind_mg, ind_dg]=phot_prior_dict[lbl][inbox][ind_draws]*1.0
+                        draws_dict[lbl][ind_mg, ind_dg]=phot_prior_dict[id_key][lbl][inbox][ind_draws]*1.0
                         self.Model[id_key][lbl]=draws_dict[lbl]
 
                     if make_PCA_plot:
-                        plt.scatter(phot_prior_dict[PCA_keys[0]][inbox][ind_draws] * 1.0,
-                                    phot_prior_dict[PCA_keys[1]][inbox][ind_draws] * 1.0,
+                        plt.scatter(phot_prior_dict[id_key][PCA_keys[0]][inbox][ind_draws] * 1.0,
+                                    phot_prior_dict[id_key][PCA_keys[1]][inbox][ind_draws] * 1.0,
                                     s=weight_inbox.sum() * 2500, marker='*')
 
             if make_PCA_plot:

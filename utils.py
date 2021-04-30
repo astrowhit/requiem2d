@@ -1,5 +1,6 @@
 import numpy as np
 import theano.tensor as tt
+from pymc3.distributions.dist_math import normal_lccdf
 
 def wquantile(data, weights, quantile):
     # Code from wquantile package
@@ -15,3 +16,6 @@ def stick_breaking(beta, M):
     portion_remaining = beta*tt.concatenate([tt.ones((M,1)),tt.cumprod(1.0-beta,axis=1)[:,:-1]],axis=1)
     portion_remaining=portion_remaining/tt.sum(portion_remaining, axis=1, keepdims=True)
     return portion_remaining
+
+def upper_limit_likelihood(mu, sigma, N_upper_limit, upper_limit):
+    return N_upper_limit * normal_lccdf(mu, sigma, upper_limit)
