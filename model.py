@@ -296,14 +296,20 @@ class ResolvedModel(Photometry):
             fit_mask = fit_mask | self.st[bin_id].fit_mask
         self.fcc = cc & fit_mask
 
-    def perform_fit(self, tune=1000, draws=1000, chains=2, target_accept=0.9,
+    def perform_fit(self, tune=1000, draws=1000, chains=2, target_accept=0.9, max_treedepth=None,
                     method='advi+adapt_diag', save_trace=True):
         """
         TBD
         """
-        with self.pymc3_model:
-            trace = pm.sample(tune=tune, draws=draws, n_init=200000, chains=chains,
-             cores=4, init=method, target_accept=target_accept)
+        if max_treedepth is not None:
+            with self.pymc3_model:
+                trace = pm.sample(tune=tune, draws=draws, n_init=200000, chains=chains,
+                cores=4, init=method, target_accept=target_accept, max_treedepth=max_treedepth)
+        else:
+            with self.pymc3_model:
+                trace = pm.sample(tune=tune, draws=draws, n_init=200000, chains=chains,
+                cores=4, init=method, target_accept=target_accept)
+
         self.trace = trace
 
         self.trace_values = {}
@@ -386,8 +392,9 @@ class ResolvedModel(Photometry):
         self.AGE_edge=AGE_edge
         self.AGE_width = (AGE_edge[1:]-AGE_edge[:-1])
 
-    def init_fitter(self, sfh_prior='linear_ar2', k=1, tau=400,
-                    include_global=True, low_pol=0, up_pol=2, regularize_old=False, mixture_photometry=True):
+    def init_fitter(self, sfh_prior='linear_ar2', k=1, tau=400, include_spectroscopy=True,
+                    include_global=True, low_pol=0, up_pol=2, regularize_old=False,
+                    mixture_photometry=True):
         """
         TBD
         """
@@ -606,8 +613,8 @@ class ResolvedModel(Photometry):
             est_model_poly = tt.tensordot(px,sh_A_poly_reduced, axes=[[0],[0]])
             est_model_others = contam_scale*sh_contamf+tt.tensordot(bg_scale, sh_A_bg_reduced,axes=[[0],[0]])
             full_model = est_model_spec +est_model_poly + est_model_others
-
-            Spec_obs=pm.Normal('Spec_obs',mu=full_model,sd=sh_stdf_s,
+            if include_spectroscopy:
+                Spec_obs=pm.Normal('Spec_obs',mu=full_model,sd=sh_stdf_s,
                                       observed=sh_data_s, shape=(L,))
 
         if mixture_photometry:
@@ -654,7 +661,7 @@ class ResolvedModel(Photometry):
                     Phot_obs_unresolved = pm.Potential('Phot_obs_unresolved', upper_limit_likelihood(est_model_phot_unresolved,
                                             eps_censored, len(iloc_semiresolved), 3*sh_eflam_semiresolved))
 
-    def make_joint_models(self, phot_prior_dict, weights=None,
+    def make_joint_models(self, phot_prior_dict, weights_dict=None,
                                   PCA_keys=['logzsol', 'dust2'], PCA_nbox=[3, 4],
                                   Nbox=15, make_PCA_plot=True, save_data=True):
         """
@@ -662,9 +669,7 @@ class ResolvedModel(Photometry):
         """
         import fsps
 
-        theta_labels=list(phot_prior_dict.keys())
-        if weights is None:
-            weights = np.ones_like(phot_prior_dict[theta_labels[0]])
+        theta_labels=list(phot_prior_dict['bin_1'].keys())
 
         xN, yN=PCA_nbox
         xN+=1
@@ -707,6 +712,11 @@ class ResolvedModel(Photometry):
         self.Model={}
         for bin_counter, id_key in enumerate(list(self.st.keys())):
             self.Model[id_key]={}
+            if weights_dict is None:
+                weights = np.ones_like(phot_prior_dict[id_key][theta_labels[0]])
+            else:
+                weights = weights_dict[id_key]*1.0
+
             for ib, beam in enumerate(self.st[id_key].beams):
                 beam.kernel = self.master_kernel[id_key][ib] * 1.0
                 beam.kernel *= self.ref_phot_dict[self.bands[0]][id_key]['flam']
