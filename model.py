@@ -722,10 +722,27 @@ class ResolvedModel(Photometry):
                 beam.kernel *= self.ref_phot_dict[self.bands[0]][id_key]['flam']
                 beam._build_model()
 
-            X_grid = np.linspace(wquantile(phot_prior_dict[id_key][PCA_keys[0]], weights, LOW_PERC),
+            if PCA_keys is None:
+                from sklearn.decomposition import PCA
+
+                first_lbl = theta_labels[0]
+                X_PCA = np.zeros((len(theta_labels), phot_prior_dict[id_key][first_lbl].shape[0]))
+                for ilbl, lbl in enumerate(theta_labels):
+                    X_PCA[ilbl] = phot_prior_dict[id_key][lbl]*1.0
+
+                pca_ = PCA(n_components=2)
+                X_new = pca_.fit_transform(X_PCA.T)
+                self.pca_ = pca_
+                X_grid = np.linspace(wquantile(X_new[:,0], weights, LOW_PERC),
+                                wquantile(X_new[:,0], weights, HIGH_PERC), xN)
+                Y_grid = np.linspace(wquantile(X_new[:,1], weights, LOW_PERC),
+                                    wquantile(X_new[:,1], weights, HIGH_PERC), yN)
+
+            else:
+                X_grid = np.linspace(wquantile(phot_prior_dict[id_key][PCA_keys[0]], weights, LOW_PERC),
                                 wquantile(phot_prior_dict[id_key][PCA_keys[0]], weights, HIGH_PERC),
                                      xN)
-            Y_grid = np.linspace(wquantile(phot_prior_dict[id_key][PCA_keys[1]], weights, LOW_PERC),
+                Y_grid = np.linspace(wquantile(phot_prior_dict[id_key][PCA_keys[1]], weights, LOW_PERC),
                                     wquantile(phot_prior_dict[id_key][PCA_keys[1]], weights, HIGH_PERC),
                                      yN)
 
@@ -737,7 +754,10 @@ class ResolvedModel(Photometry):
 
             if make_PCA_plot:
                 plt.figure(figsize=(8, 8))
-                plt.scatter(phot_prior_dict[id_key][PCA_keys[0]], phot_prior_dict[id_key][PCA_keys[1]], color='black', s=1, alpha=0.1)
+                if PCA_keys is None:
+                    plt.scatter(X_new[:,0], X_new[:,1], color='black', s=1, alpha=0.1)
+                else:
+                    plt.scatter(phot_prior_dict[id_key][PCA_keys[0]], phot_prior_dict[id_key][PCA_keys[1]], color='black', s=1, alpha=0.1)
 
             for ind_mg in range(X_grid[:-1].shape[0]):
 
@@ -747,7 +767,11 @@ class ResolvedModel(Photometry):
                     dg_min = Y_grid[ind_dg] * 1.0
                     dg_max = Y_grid[ind_dg + 1] * 1.0
 
-                    inbox = (phot_prior_dict[id_key][PCA_keys[0]] >= mg_min) & (phot_prior_dict[id_key][PCA_keys[0]] < mg_max) & \
+                    if PCA_keys is None:
+                        inbox = (X_new[:,0] >= mg_min) & (X_new[:,0] < mg_max) & \
+                            (X_new[:,1] >= dg_min) & (X_new[:,1] < dg_max)
+                    else:
+                        inbox = (phot_prior_dict[id_key][PCA_keys[0]] >= mg_min) & (phot_prior_dict[id_key][PCA_keys[0]] < mg_max) & \
                             (phot_prior_dict[id_key][PCA_keys[1]] >= dg_min) & (phot_prior_dict[id_key][PCA_keys[1]] < dg_max)
 
                     weight_inbox = weights[inbox] * 1.0
@@ -769,7 +793,13 @@ class ResolvedModel(Photometry):
                         self.Model[id_key][lbl]=draws_dict[lbl]
 
                     if make_PCA_plot:
-                        plt.scatter(phot_prior_dict[id_key][PCA_keys[0]][inbox][ind_draws] * 1.0,
+                        if PCA_keys is None:
+                            plt.scatter(X_new[:,0][inbox][ind_draws] * 1.0,
+                                    X_new[:,1][inbox][ind_draws] * 1.0,
+                                    s=weight_inbox.sum() * 2500, marker='*')
+
+                        else:
+                            plt.scatter(phot_prior_dict[id_key][PCA_keys[0]][inbox][ind_draws] * 1.0,
                                     phot_prior_dict[id_key][PCA_keys[1]][inbox][ind_draws] * 1.0,
                                     s=weight_inbox.sum() * 2500, marker='*')
 
@@ -780,8 +810,12 @@ class ResolvedModel(Photometry):
                     plt.axhline(dg, color='crimson')
                 plt.xlim(X_grid.min(), X_grid.max())
                 plt.ylim(Y_grid.min(), Y_grid.max())
-                plt.ylabel(PCA_keys[1])
-                plt.xlabel(PCA_keys[0])
+                if PCA_keys is None:
+                    plt.ylabel('PC2')
+                    plt.xlabel('PC1')
+                else:
+                    plt.ylabel(PCA_keys[1])
+                    plt.xlabel(PCA_keys[0])
                 plt.savefig('{0}bin_{1}_PCA.pdf'.format(self.im_root, bin_counter+1))
                 plt.close()
 
