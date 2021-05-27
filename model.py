@@ -394,7 +394,7 @@ class ResolvedModel(Photometry):
 
     def init_fitter(self, sfh_prior='linear_ar2', k=1, tau=400, include_spectroscopy=True,
                     include_global=True, low_pol=0, up_pol=2, regularize_old=False,
-                    mixture_photometry=True):
+                    mixture_photometry=True, include_semiresolved=True, complex_dust_geometry=False):
         """
         TBD
         """
@@ -547,6 +547,32 @@ class ResolvedModel(Photometry):
         sh_dt = shared(((dt[:,None]/A_mass_interp)/(dt[:,None]/A_mass_interp).max(axis=0)[None,:]))
         sh_reg=shared(np.exp(-self.AGE/5)[:,None]*np.ones((N,M)))
 
+        young_age = self.AGE*0.0
+        young_age[self.AGE<=0.01]=1.0
+        pivot_wave = []
+        for band in self.bands:
+            pivot_wave.append(self.ref_phot_dict[band]['pysyn'].pivot())
+        pivot_wave = np.asarray(pivot_wave)
+        pwave = pivot_wave[iloc_res]*1.0
+        pwave_ir = pivot_wave[iloc_global]*1.0
+        pwave_semiresolved = pivot_wave[iloc_semiresolved]*1.0
+        sh_grism_wave = shared(self.st['bin_1'].wavef[self.fcc]*1.0)
+        if complex_dust_geometry:
+            dust1_=[]
+            dust2_=[]
+            dust_index_=[]
+            for id_bin in self.st.keys():
+                dust1_.append(np.median(self.Model[id_bin]['dust1'],axis=-1).flatten())
+                dust2_.append(np.median(self.Model[id_bin]['dust2'],axis=-1).flatten())
+                dust_index_.append(np.median(self.Model[id_bin]['dust_index'],axis=-1).flatten())
+            dust1_=np.asarray(dust1_)
+            dust2_=np.asarray(dust2_)
+            dust_index_=np.asarray(dust_index_)
+            corr_ = get_atten_curve(dust1_, dust2_, dust_index_, pwave, young_age)
+            self.corr_=corr_
+            corr_ir_ = get_atten_curve(dust1_, dust2_, dust_index_, pwave_ir, young_age)
+            corr_semiresolved_ = get_atten_curve(dust1_, dust2_, dust_index_, pwave_semiresolved, young_age)
+
         self.pymc3_model = pm.Model()
 
         if sfh_prior=='linear_ar2':
@@ -597,6 +623,23 @@ class ResolvedModel(Photometry):
             dir_a = pm.Beta('dir_a', tt.ones((M,NxNy)), alpha.dimshuffle(0,'x')*tt.ones((M,NxNy)), shape=(M,NxNy))
             w = pm.Deterministic('w', stick_breaking(dir_a, M))
 
+            if complex_dust_geometry:
+                dir_dust_a = pm.Beta('dir_dust_a',1.0, 3.0, shape=(M,4))
+                w_dust_geo = pm.Deterministic('w_dust_geo', stick_breaking(dir_dust_a, M))
+
+                sh_A_phot_w = tt.zeros_like(sh_A_phot)
+                sh_A_phot_ir_w = tt.zeros_like(sh_A_phot_ir)
+                sh_A_phot_semiresolved_w = tt.zeros_like(sh_A_phot_semiresolved)
+                for ii in range(M):
+                    sh_A_phot_w = tt.set_subtensor(sh_A_phot_w[:,:,ii], tt.tensordot(w_dust_geo[ii],corr_[:,:,:,ii],axes=[[0],[0]])*sh_A_phot[:,:,ii])
+                    sh_A_phot_ir_w = tt.set_subtensor(sh_A_phot_ir_w[:,:,ii],tt.tensordot(w_dust_geo[ii],corr_ir_[:,:,:,ii],axes=[[0],[0]])*sh_A_phot_ir[:,:,ii])
+                    sh_A_phot_semiresolved_w = tt.set_subtensor(sh_A_phot_semiresolved_w[:,:,ii], tt.tensordot(w_dust_geo[ii],corr_semiresolved_[:,:,:,ii],axes=[[0],[0]])*sh_A_phot_semiresolved[:,:,ii])
+
+            else:
+                sh_A_phot_w = sh_A_phot
+                sh_A_phot_ir_w = sh_A_phot_ir
+                sh_A_phot_semiresolved_w = sh_A_phot_semiresolved
+
             contam_scale=pm.Normal('contam_scale', mu=0.0, sd=1.0)
             bg_scale = pm.Normal('bg_scale', mu=0.0, sd=1.0, shape=(Nbg))
             px = pm.Normal('px', mu=0.0, sd=1.0, shape=(pol_sh))
@@ -622,7 +665,7 @@ class ResolvedModel(Photometry):
                 est_model_phot=tt.zeros((P, M, NxNy))
                 for ii in range(M):
                     est_model_phot = tt.set_subtensor(est_model_phot[:, ii],pw[ii]*tt.tensordot(x.T[ii],
-                                                sh_A_phot[:, :, ii],axes=[[0],[0]]))
+                                                sh_A_phot_w[:, :, ii],axes=[[0],[0]]))
                 comps_phot = pm.Normal.dist(mu=est_model_phot.reshape((P*M,NxNy)), sd=sh_stdf_p, shape=(P*M,NxNy))
                 Phot_obs=pm.Mixture('Phot_obs',w=(w.dimshuffle('x',0,1)*tt.ones((P,M,NxNy))).reshape((P*M,NxNy)),
                                     comp_dists=comps_phot, observed=sh_data_p, shape=(P*M))
@@ -631,7 +674,7 @@ class ResolvedModel(Photometry):
                 est_model_phot=tt.zeros((P, M))
                 for ii in range(M):
                     est_model_phot = tt.set_subtensor(est_model_phot[:, ii],pw[ii]*tt.tensordot(x[:,ii].dimshuffle(0,'x')*w[ii].dimshuffle('x',0),
-                                                sh_A_phot[:, :, ii],axes=[[0,1],[0,2]]))
+                                                sh_A_phot_w[:, :, ii],axes=[[0,1],[0,2]]))
                 Phot_obs = pm.Normal('Phot_obs',mu=tt.flatten(est_model_phot), sd=sh_stdf_p[:,0], observed=sh_data_p)
 
         if include_global:
@@ -639,20 +682,20 @@ class ResolvedModel(Photometry):
                 est_model_phot_ir=tt.zeros(len(iloc_global))
                 for ii in range(M):
                     est_model_phot_ir+=pw[ii]*tt.tensordot(x[:,ii].dimshuffle(0,'x')*w[ii].dimshuffle('x',0),
-                                                    sh_A_phot_ir[:,:,ii,:],axes=[[0,1],[0,2]])
+                                                    sh_A_phot_ir_w[:,:,ii,:],axes=[[0,1],[0,2]])
                 Phot_obs_ir=pm.Normal('Phot_obs_ir',mu=est_model_phot_ir, sd=sh_eflam, observed=sh_flam)
 
-            if len(self.semiresolved_bands)!=0:
+            if len(self.semiresolved_bands)!=0 and include_semiresolved:
                 with self.pymc3_model:
                     est_model_phot_semiresolved=tt.zeros(len(iloc_semiresolved))
                     est_model_phot_unresolved=tt.zeros(len(iloc_semiresolved))
                     for ii in range(M):
                         if semiresolved_ind[ii]:
                             est_model_phot_semiresolved+=pw[ii]*tt.tensordot(x[:,ii].dimshuffle(0,'x')*w[ii].dimshuffle('x',0),
-                                                    sh_A_phot_semiresolved[:,:,ii,:],axes=[[0,1],[0,2]])
+                                                    sh_A_phot_semiresolved_w[:,:,ii,:],axes=[[0,1],[0,2]])
                         else:
                             est_model_phot_unresolved+=pw[ii]*tt.tensordot(x[:,ii].dimshuffle(0,'x')*w[ii].dimshuffle('x',0),
-                                                    sh_A_phot_semiresolved[:,:,ii,:],axes=[[0,1],[0,2]])
+                                                    sh_A_phot_semiresolved_w[:,:,ii,:],axes=[[0,1],[0,2]])
 
                     Phot_obs_semiresolved=pm.Normal('Phot_obs_semiresolved',mu=est_model_phot_semiresolved,
                                     sd=sh_eflam_semiresolved, observed=sh_flam_semiresolved)
