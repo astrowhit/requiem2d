@@ -22,16 +22,18 @@ def upper_limit_likelihood(mu, sigma, N_upper_limit, upper_limit):
     return N_upper_limit * normal_lcdf(mu, sigma, upper_limit)
 
 def exp_atten_curve(dust_amp, dust_index, lam):
-    return np.exp((dust_amp[None]*(lam[:,None,None]/5500.)**dust_index[None]))
+    return tt.exp((dust_amp.dimshuffle('x',0,1)*(lam.dimshuffle(0,'x','x')/5500.)**dust_index.dimshuffle('x',0,1)))
 
-def get_atten_curve(dust1, dust2, dust_index, lam, young_age):
-    young_correction=(young_age[:,None,None,None]*exp_atten_curve(dust1, dust_index, lam)+1.0)
-    old_correction = np.ones_like(young_age)[:,None,None,None]*exp_atten_curve(dust2, dust_index, lam)
-    total_correction=young_correction*old_correction
-    corr_=[]
-    corr_.append(np.ones_like(young_correction))
-    corr_.append(young_correction)
-    corr_.append(old_correction)
-    corr_.append(total_correction)
-    corr_=np.asarray(corr_)
-    return shared(corr_)
+def get_atten_curve(dust1, dust2, dust_index, ext_dust1, ext_dust2, ext_dust_index, lam, young_age, sh):
+    young_undone=young_age.dimshuffle(0,'x','x','x')*exp_atten_curve(dust1, dust_index, lam)+(1.0-young_age).dimshuffle(0,'x','x','x')*tt.ones((sh[1],sh[2],sh[3],sh[4]))
+    old_undone = tt.ones_like(young_age).dimshuffle(0,'x','x','x')*exp_atten_curve(dust2, dust_index, lam)
+    young_correction=young_age.dimshuffle(0,'x','x','x')*exp_atten_curve(-ext_dust1, ext_dust_index, lam)+(1.0-young_age).dimshuffle(0,'x','x','x')*tt.ones((sh[1],sh[2],sh[3],sh[4]))
+    old_correction=tt.ones_like(young_age).dimshuffle(0,'x','x','x')*exp_atten_curve(-ext_dust2, ext_dust_index, lam)
+    total_undone=young_undone*old_undone
+    total_correction = young_correction*old_correction
+    corr_=tt.zeros(sh)
+    corr_=tt.set_subtensor(corr_[0], total_correction*total_undone)
+    corr_=tt.set_subtensor(corr_[1], old_correction*total_undone)
+    corr_=tt.set_subtensor(corr_[2], young_correction*old_undone)
+    corr_=tt.set_subtensor(corr_[3], total_undone)
+    return corr_

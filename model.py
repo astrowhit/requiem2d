@@ -549,6 +549,7 @@ class ResolvedModel(Photometry):
 
         young_age = self.AGE*0.0
         young_age[self.AGE<=0.01]=1.0
+        sh_young_age=shared(young_age)
         pivot_wave = []
         for band in self.bands:
             pivot_wave.append(self.ref_phot_dict[band]['pysyn'].pivot())
@@ -556,6 +557,9 @@ class ResolvedModel(Photometry):
         pwave = pivot_wave[iloc_res]*1.0
         pwave_ir = pivot_wave[iloc_global]*1.0
         pwave_semiresolved = pivot_wave[iloc_semiresolved]*1.0
+        sh_pwave=shared(pwave)
+        sh_pwave_ir=shared(pwave_ir)
+        sh_pwave_semiresolved=shared(pwave_semiresolved)
         sh_grism_wave = shared(self.st['bin_1'].wavef[self.fcc]*1.0)
         if complex_dust_geometry:
             dust1_=[]
@@ -568,10 +572,19 @@ class ResolvedModel(Photometry):
             dust1_=np.asarray(dust1_)
             dust2_=np.asarray(dust2_)
             dust_index_=np.asarray(dust_index_)
-            corr_ = get_atten_curve(dust1_, dust2_, dust_index_, pwave, young_age)
-            self.corr_=corr_
-            corr_ir_ = get_atten_curve(dust1_, dust2_, dust_index_, pwave_ir, young_age)
-            corr_semiresolved_ = get_atten_curve(dust1_, dust2_, dust_index_, pwave_semiresolved, young_age)
+            sh_dust1_=shared(dust1_)
+            sh_dust2_=shared(dust2_)
+            sh_dust_index_=shared(dust_index_)
+            sh= (4, N, pwave.shape[0], M, NxNy)
+            sh_ir= (4, N, pwave_ir.shape[0], M, NxNy)
+            sh_semiresolved= (4, N, pwave_semiresolved.shape[0], M, NxNy)
+
+            #corr_ = get_atten_curve(dust1_, dust2_, dust_index_, pwave, young_age)
+            #self.corr_=corr_
+            #corr_ir_ = get_atten_curve(dust1_, dust2_, dust_index_, pwave_ir, young_age)
+            #self.corr_ir_=corr_ir_
+            #corr_semiresolved_ = get_atten_curve(dust1_, dust2_, dust_index_, pwave_semiresolved, young_age)
+            #self.corr_semiresolved_=corr_semiresolved_
 
         self.pymc3_model = pm.Model()
 
@@ -624,8 +637,17 @@ class ResolvedModel(Photometry):
             w = pm.Deterministic('w', stick_breaking(dir_a, M))
 
             if complex_dust_geometry:
+                BoundedNormal=pm.Bound(pm.Normal,lower=-0.5*tt.ones((M,NxNy)),upper=0.5*tt.ones((M,NxNy)))
                 dir_dust_a = pm.Beta('dir_dust_a',1.0, 3.0, shape=(M,4))
                 w_dust_geo = pm.Deterministic('w_dust_geo', stick_breaking(dir_dust_a, M))
+
+                ext_dust1 = pm.HalfNormal('ext_dust1',sd=1.5*tt.ones((M,NxNy)),shape=(M,NxNy))
+                ext_dust2 = pm.HalfNormal('ext_dust2',sd=1.5*tt.ones((M,NxNy)),shape=(M,NxNy))
+                ext_dust_index = BoundedNormal('ext_dust_index',mu=0,sd=0.5*tt.ones((M,NxNy)),shape=(M,NxNy))
+
+                corr_ = get_atten_curve(sh_dust1_, sh_dust2_, sh_dust_index_, ext_dust1, ext_dust2, ext_dust_index, sh_pwave, sh_young_age, sh)
+                corr_ir_ = get_atten_curve(sh_dust1_, sh_dust2_, sh_dust_index_, ext_dust1, ext_dust2, ext_dust_index, sh_pwave_ir, sh_young_age, sh_ir)
+                corr_semiresolved_ = get_atten_curve(sh_dust1_, sh_dust2_, sh_dust_index_, ext_dust1, ext_dust2, ext_dust_index, sh_pwave_semiresolved, sh_young_age, sh_semiresolved)
 
                 sh_A_phot_w = tt.zeros_like(sh_A_phot)
                 sh_A_phot_ir_w = tt.zeros_like(sh_A_phot_ir)
@@ -700,7 +722,7 @@ class ResolvedModel(Photometry):
                     Phot_obs_semiresolved=pm.Normal('Phot_obs_semiresolved',mu=est_model_phot_semiresolved,
                                     sd=sh_eflam_semiresolved, observed=sh_flam_semiresolved)
 
-                    eps_censored = pm.HalfNormal('eps_censored', sd=1.0, shape=(len(iloc_semiresolved)))
+                    eps_censored = pm.HalfNormal('eps_censored', sd=sh_eflam_semiresolved/(2*M), shape=(len(iloc_semiresolved)))
                     Phot_obs_unresolved = pm.Potential('Phot_obs_unresolved', upper_limit_likelihood(est_model_phot_unresolved,
                                             eps_censored, len(iloc_semiresolved), 3*sh_eflam_semiresolved))
 
