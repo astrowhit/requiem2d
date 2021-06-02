@@ -34,6 +34,6 @@ def get_atten_curve(dust1, dust2, dust_index, ext_dust1, ext_dust2, ext_dust_ind
     corr_=tt.zeros(sh)
     corr_=tt.set_subtensor(corr_[0], total_correction*total_undone)
     corr_=tt.set_subtensor(corr_[1], old_correction*total_undone)
-    corr_=tt.set_subtensor(corr_[2], young_correction*old_undone)
+    corr_=tt.set_subtensor(corr_[2], young_correction*total_undone)
     corr_=tt.set_subtensor(corr_[3], total_undone)
     return corr_

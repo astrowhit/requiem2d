@@ -579,13 +579,6 @@ class ResolvedModel(Photometry):
             sh_ir= (4, N, pwave_ir.shape[0], M, NxNy)
             sh_semiresolved= (4, N, pwave_semiresolved.shape[0], M, NxNy)
 
-            #corr_ = get_atten_curve(dust1_, dust2_, dust_index_, pwave, young_age)
-            #self.corr_=corr_
-            #corr_ir_ = get_atten_curve(dust1_, dust2_, dust_index_, pwave_ir, young_age)
-            #self.corr_ir_=corr_ir_
-            #corr_semiresolved_ = get_atten_curve(dust1_, dust2_, dust_index_, pwave_semiresolved, young_age)
-            #self.corr_semiresolved_=corr_semiresolved_
-
         self.pymc3_model = pm.Model()
 
         if sfh_prior=='linear_ar2':
