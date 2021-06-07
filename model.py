@@ -630,17 +630,21 @@ class ResolvedModel(Photometry):
             w = pm.Deterministic('w', stick_breaking(dir_a, M))
 
             if complex_dust_geometry:
-                BoundedNormal=pm.Bound(pm.Normal,lower=-0.5*tt.ones((M,NxNy)),upper=0.5*tt.ones((M,NxNy)))
+                dustIndexNormal=pm.Bound(pm.Normal,lower=-0.5*tt.ones((M)),upper=0.5*tt.ones((M)))
+
                 dir_dust_a = pm.Beta('dir_dust_a',1.0, 3.0, shape=(M,4))
                 w_dust_geo = pm.Deterministic('w_dust_geo', stick_breaking(dir_dust_a, M))
 
-                ext_dust1 = pm.HalfNormal('ext_dust1',sd=1.5*tt.ones((M,NxNy)),shape=(M,NxNy))
-                ext_dust2 = pm.HalfNormal('ext_dust2',sd=1.5*tt.ones((M,NxNy)),shape=(M,NxNy))
-                ext_dust_index = BoundedNormal('ext_dust_index',mu=0,sd=0.5*tt.ones((M,NxNy)),shape=(M,NxNy))
+                alpha_dust1 = pm.HalfNormal('alpha_dust1', sd=0.5)
+                alpha_dust2 = pm.HalfNormal('alpha_dust2', sd=0.5)
+                alpha_dust_index = pm.HalfNormal('alpha_dust_index', sd=0.5)
+                ext_dust1 = pm.Normal('ext_dust1',mu=0, sd=alpha_dust1,shape=(M))
+                ext_dust2 = pm.Normal('ext_dust2',mu=0,sd=alpha_dust2,shape=(M))
+                ext_dust_index = dustIndexNormal('ext_dust_index',mu=0,sd=alpha_dust_index,shape=(M))
 
-                corr_ = get_atten_curve(sh_dust1_, sh_dust2_, sh_dust_index_, ext_dust1, ext_dust2, ext_dust_index, sh_pwave, sh_young_age, sh)
-                corr_ir_ = get_atten_curve(sh_dust1_, sh_dust2_, sh_dust_index_, ext_dust1, ext_dust2, ext_dust_index, sh_pwave_ir, sh_young_age, sh_ir)
-                corr_semiresolved_ = get_atten_curve(sh_dust1_, sh_dust2_, sh_dust_index_, ext_dust1, ext_dust2, ext_dust_index, sh_pwave_semiresolved, sh_young_age, sh_semiresolved)
+                corr_ = get_atten_curve(sh_dust1_, sh_dust2_, sh_dust_index_, sh_dust1_+ext_dust1.dimshuffle(0,'x')*tt.ones((M,NxNy)), sh_dust2_+ext_dust2.dimshuffle(0,'x')*tt.ones((M,NxNy)), sh_dust_index_+ext_dust_index.dimshuffle(0,'x')*tt.ones((M,NxNy)), sh_pwave, sh_young_age, sh)
+                corr_ir_ = get_atten_curve(sh_dust1_, sh_dust2_, sh_dust_index_, sh_dust1_+ext_dust1.dimshuffle(0,'x')*tt.ones((M,NxNy)), sh_dust2_+ext_dust2.dimshuffle(0,'x')*tt.ones((M,NxNy)), sh_dust_index_+ext_dust_index.dimshuffle(0,'x')*tt.ones((M,NxNy)), sh_pwave_ir, sh_young_age, sh_ir)
+                corr_semiresolved_ = get_atten_curve(sh_dust1_, sh_dust2_, sh_dust_index_, sh_dust1_+ext_dust1.dimshuffle(0,'x')*tt.ones((M,NxNy)), sh_dust2_+ext_dust2.dimshuffle(0,'x')*tt.ones((M,NxNy)), sh_dust_index_+ext_dust_index.dimshuffle(0,'x')*tt.ones((M,NxNy)), sh_pwave_semiresolved, sh_young_age, sh_semiresolved)
 
                 sh_A_phot_w = tt.zeros_like(sh_A_phot)
                 sh_A_phot_ir_w = tt.zeros_like(sh_A_phot_ir)
