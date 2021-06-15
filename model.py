@@ -23,7 +23,7 @@ HIGH_PERC=0.9986
 
 class Photometry(object):
     def __init__(self, id, RA, DEC, global_photometry, global_bands, semiresolved_bands, semiresolved_bins,
-                im_root, region_file=None, sci_ext=0, aper_correct_file=None):
+                im_root, clean_im=False, clean_im_id=-1, ref_phot_band=None, ref_grism_band=None, region_file=None, sci_ext=0, aper_correct_file=None):
         """
         TBD
         """
@@ -38,10 +38,25 @@ class Photometry(object):
         self.semiresolved_bands = semiresolved_bands
         self.semiresolved_bins = semiresolved_bins
         self.im_root = im_root
+        self.clean_im = clean_im
+        if clean_im_id==-1:
+            self.clean_im_id = self.global_id
+        else:
+            self.clean_im_id = clean_im_id
 
         self.ref_phot_dict={}
         for band in self.bands:
             self.ref_phot_dict[band]={}
+
+        if ref_phot_band is None:
+            self.ref_phot_band=self.bands[0]
+        else:
+            self.ref_phot_band=ref_phot_band
+
+        if ref_grism_band is None:
+            self.ref_grism_band=self.bands[0]
+        else:
+            self.ref_grism_band=ref_grism_band
 
         self.reg_file = region_file
         self.regions = pyregion.open(region_file)
@@ -59,9 +74,14 @@ class Photometry(object):
         """
 
         try:
-            im_path = self.im_root+band+'_drz_sci.fits'
-            im_hdu = pyfits.open(im_path)
-            im_hdu.close()
+            if self.clean_im:
+                im_path = self.im_root+band+'_drz_sci_clean.fits'
+                im_hdu = pyfits.open(im_path)
+                im_hdu.close()
+            else:
+                im_path = self.im_root+band+'_drz_sci.fits'
+                im_hdu = pyfits.open(im_path)
+                im_hdu.close()
             return True
         except FileNotFoundError:
             return False
@@ -82,17 +102,17 @@ class Photometry(object):
         TBD
         """
 
-        if self._isIR(self.bands[0]):
-            im_path = self.im_root+self.bands[0]+'_drz_sci.fits'
+        if self._isIR(self.ref_grism_band):
+            im_path = self.im_root+self.ref_grism_band+'_drz_sci.fits'
             im_hdu = pyfits.open(im_path)
-            wht_hdu = pyfits.open(self.im_root+self.bands[0]+'_drz_wht.fits')
+            wht_hdu = pyfits.open(self.im_root+self.ref_grism_band+'_drz_wht.fits')
         else:
-            im_path = self.im_root+self.bands[0]+'_drc_sci.fits'
+            im_path = self.im_root+self.ref_grism_band+'_drc_sci.fits'
             im_hdu = pyfits.open(im_path)
-            wht_hdu = pyfits.open(self.im_root+self.bands[0]+'_drc_wht.fits')
+            wht_hdu = pyfits.open(self.im_root+self.ref_grism_band+'_drc_wht.fits')
 
-        seg_hdu = pyfits.open(self.im_root+self.bands[0]+'_seg.fits')
-        self.ref_seg_path = self.im_root+self.bands[0]+'_seg.fits'
+        seg_hdu = pyfits.open(self.im_root+self.ref_grism_band+'_seg.fits')
+        self.ref_seg_path = self.im_root+self.ref_grism_band+'_seg.fits'
 
         self.ref_im_path=im_path
         self.ref_im = im_hdu[self.sci_ext].data*1.0
@@ -111,10 +131,19 @@ class Photometry(object):
 
         # Create masks using segmentation map and user provided region reg_files
         # to calculate the initial photometry for each band
-        for ireg, reg in enumerate(self.regions):
+        if self.clean_im:
+            clean_seg_hdu = pyfits.open(self.im_root+band+'_seg_clean.fits')
+            seg_mask = np.zeros_like(clean_seg_hdu[self.sci_ext].data)
+            seg_mask[clean_seg_hdu[self.sci_ext].data==self.clean_im_id]=True
+        else:
             seg_mask = np.zeros_like(self.ref_seg, dtype=np.bool)
             seg_mask[self.ref_seg==self.global_id]=True
-            self.resolved_seg = np.zeros_like(self.ref_seg)
+
+        ref_seg_mask = np.zeros_like(self.ref_seg, dtype=np.bool)
+        ref_seg_mask[self.ref_seg==self.global_id]=True
+        self.resolved_seg = np.zeros_like(self.ref_seg)
+
+        for ireg, reg in enumerate(self.regions):
 
             self.resolved_ids.append(int(1e4+ireg+1))
             id_key = 'bin_{0}'.format(ireg+1)
@@ -123,19 +152,40 @@ class Photometry(object):
                 if band in self.global_bands or band in self.semiresolved_bands:
                     continue
                 self.ref_phot_dict[band][id_key] = {}
-                if iband == 0:
-                    im = self.ref_im*1.0
-                    wht = self.ref_wht*1.0
-                    reg_mask = self.regions.get_filter(self.ref_hdu[self.sci_ext].header)[ireg].mask(im.shape)
-                    self.ref_phot_dict[band]['photflam']=self.ref_hdu[self.sci_ext].header['PHOTFLAM']*1.0
-                    self.resolved_seg[seg_mask & reg_mask] = 1e4+ireg+1
-                else:
-                    if self._isIR(band):
-                        im_path = self.im_root+band+'_drz_sci.fits'
-                        wht_path = self.im_root+band+'_drz_wht.fits'
+                if band == self.ref_grism_band:
+                    if self.clean_im:
+                        if self._isIR(band):
+                            im_path = self.im_root+band+'_drz_sci_clean.fits'
+                            wht_path = self.im_root+band+'_drz_wht_clean.fits'
+                        else:
+                            im_path = self.im_root+band+'_drc_sci_clean.fits'
+                            wht_path = self.im_root+band+'_drc_wht_clean.fits'
+                        im_hdu = pyfits.open(im_path)
+                        wht_hdu = pyfits.open(wht_path)
+                        reg_mask = self.regions.get_filter(im_hdu[self.sci_ext].header)[ireg].mask(im_hdu[self.sci_ext].data.shape)
+                        self.ref_phot_dict[band]['photflam']=im_hdu[self.sci_ext].header['PHOTFLAM']*1.0
                     else:
-                        im_path = self.im_root+band+'_drc_sci.fits'
-                        wht_path = self.im_root+band+'_drc_wht.fits'
+                        im = self.ref_im*1.0
+                        wht = self.ref_wht*1.0
+                        reg_mask = self.regions.get_filter(self.ref_hdu[self.sci_ext].header)[ireg].mask(im.shape)
+                        self.ref_phot_dict[band]['photflam']=self.ref_hdu[self.sci_ext].header['PHOTFLAM']*1.0
+                    ref_reg_mask = self.regions.get_filter(self.ref_hdu[self.sci_ext].header)[ireg].mask(im.shape)
+                    self.resolved_seg[ref_seg_mask & ref_reg_mask] = 1e4+ireg+1
+                else:
+                    if self.clean_im:
+                        if self._isIR(band):
+                            im_path = self.im_root+band+'_drz_sci_clean.fits'
+                            wht_path = self.im_root+band+'_drz_wht_clean.fits'
+                        else:
+                            im_path = self.im_root+band+'_drc_sci_clean.fits'
+                            wht_path = self.im_root+band+'_drc_wht_clean.fits'
+                    else:
+                        if self._isIR(band):
+                            im_path = self.im_root+band+'_drz_sci.fits'
+                            wht_path = self.im_root+band+'_drz_wht.fits'
+                        else:
+                            im_path = self.im_root+band+'_drc_sci.fits'
+                            wht_path = self.im_root+band+'_drc_wht.fits'
                     im_hdu = pyfits.open(im_path)
                     wht_hdu = pyfits.open(wht_path)
                     self.ref_phot_dict[band]['photflam']=im_hdu[self.sci_ext].header['PHOTFLAM']*1.0
@@ -154,7 +204,7 @@ class Photometry(object):
 
         # Implement aperture correction to fluxes and errors if necessary
         # files are provided by user
-        band=self.bands[0]
+        band=self.ref_phot_band
         flam_=0.0
         for ireg in range(len(self.regions)):
             id_key = 'bin_{0}'.format(ireg+1)
@@ -198,29 +248,32 @@ class Photometry(object):
         """
 
         hdu_=pyfits.PrimaryHDU(data=self.updated_seg, header=self.ref_hdu[self.sci_ext].header)
-        hdu_.writeto(self.im_root+self.bands[0]+'_updated_seg.fits', overwrite=overwrite)
-        self.updated_seg_path = self.im_root+self.bands[0]+'_updated_seg.fits'
+        hdu_.writeto(self.im_root+self.ref_grism_band+'_updated_seg.fits', overwrite=overwrite)
+        self.updated_seg_path = self.im_root+self.ref_grism_band+'_updated_seg.fits'
 
 
 
 class ResolvedModel(Photometry):
     def __init__(self,  z, grism_flts, id, RA, DEC, global_photometry, global_bands, semiresolved_bands, semiresolved_bins,
-                im_root, region_file, sci_ext=0, aper_correct_file=None, MW_EBV=0.0001, size=40, fcontam=0.1,
-                 gname='res_model', remove_grism_contam=True):
+                im_root, region_file, clean_im=False, clean_im_id=-1, ref_phot_band=None, ref_grism_band=None, sci_ext=0, aper_correct_file=None,
+                MW_EBV=0.0001, size=40, fcontam=0.1, gname='res_model', remove_grism_contam=True):
         """
         TBD
         """
 
         # Make photometric catalogs
         Photometry.__init__(self, id, RA, DEC, global_photometry, global_bands, semiresolved_bands, semiresolved_bins,
-                            im_root, region_file, sci_ext, aper_correct_file)
+                            im_root, clean_im, clean_im_id, ref_phot_band, ref_grism_band, region_file, sci_ext, aper_correct_file)
+
+        self.grism_flts=grism_flts
+        self.MW_EBV = MW_EBV
 
         # Initiate FLT containter
-        self.grp = GroupFLT(grism_files=grism_flts, direct_files=[], cpu_count=4,
+        self.grp = GroupFLT(grism_files=self.grism_flts, direct_files=[], cpu_count=4,
                             ref_file=self.ref_im_path, seg_file=self.updated_seg_path,
-                            MW_EBV= MW_EBV)
+                            MW_EBV= self.MW_EBV)
 
-        ref_catalog = asc.read(self.im_root+self.bands[0]+'.cat')
+        ref_catalog = asc.read(self.im_root+self.ref_grism_band+'.cat')
         self.grp.catalog = ref_catalog[ref_catalog['NUMBER']!=self.global_id].copy()
 
         if remove_grism_contam:
@@ -228,7 +281,6 @@ class ResolvedModel(Photometry):
 
         # Initiate MultiBeam Object
         self.size=size
-        self.MW_EBV = MW_EBV
         self.fcontam = fcontam
         self.gname = gname
         self.z = z
@@ -263,7 +315,7 @@ class ResolvedModel(Photometry):
                 beam.init_galactic_extinction(MW_EBV=self.MW_EBV)
                 self.master_kernel[id_key][ib]=beam.kernel*1.0
 
-    def reomve_grism_contam(self, save_data=False):
+    def reomve_grism_contam(self, save_data=True):
         """
         TBD
         """
@@ -527,7 +579,7 @@ class ResolvedModel(Photometry):
             i0=0
             for ib, beam in enumerate(self.st[bin_id].beams):
                 beam.kernel = self.master_kernel[bin_id][ib] * 1.0
-                beam.kernel *= self.ref_phot_dict[self.bands[0]][bin_id]['flam']
+                beam.kernel *= self.ref_phot_dict[self.ref_grism_band][bin_id]['flam']
                 beam._build_model()
                 d_px=int(beam.sh[0]*beam.sh[1])
                 flat_flam[ii,i0:i0+d_px]=beam.compute_model()
@@ -537,8 +589,7 @@ class ResolvedModel(Photometry):
             xpf.append(np.ones(beam.sh[0])[:,None]*(beam.wave-1e4)[None,:]/1e4)
         xpf=np.asarray(xpf).flatten()
         A_poly=[(xpf**order)[None,:]*flat_flam for order in np.arange(low_pol,up_pol)]
-        A_poly=np.asarray(A_poly)
-        sh_A_poly_reduced=shared(A_poly[:,:,self.fcc].reshape(((len(list(self.st.keys())))*(up_pol-low_pol),self.fcc.sum())))
+        sh_A_poly_reduced=shared(np.asarray(A_poly)[:,:,self.fcc].reshape(((len(list(self.st.keys())))*(up_pol-low_pol),self.fcc.sum())))
 
         dt = self.AGE_width*1.0
         A_mass_interp=nd.gaussian_filter(np.median(A_mass_container.reshape((len(list(self.st.keys())),
@@ -662,7 +713,7 @@ class ResolvedModel(Photometry):
             contam_scale=pm.Normal('contam_scale', mu=0.0, sd=1.0)
             bg_scale = pm.Normal('bg_scale', mu=0.0, sd=1.0, shape=(Nbg))
             px = pm.Normal('px', mu=0.0, sd=1.0, shape=(pol_sh))
-            pw = BoundNormal('pw',mu=1.0,sd=0.1,shape=(M,))
+            pw = BoundNormal('pw',mu=1.0,sd=1.0,shape=(M,))
             scale_x = x.dimshuffle(0,1,'x')*w.dimshuffle('x',0,1)
 
             est_model_spec = tt.zeros(L)
@@ -671,6 +722,12 @@ class ResolvedModel(Photometry):
                 tmp=tt.set_subtensor(tmp[(sh_A_spec_idx[ii])],
                                 tt.tensordot(tt.flatten(scale_x[:,ii]),sh_A_spec_reduced[ii],axes=[[0],[0]]))
                 est_model_spec+=tmp
+
+            #est_model_poly = tt.zeros(L)
+            #for ii in range(pol_sh):
+            #    tmp=tt.zeros_like(est_model_poly)
+            #    tmp=tt.set_subtensor(tmp[(sh_A_poly_idx[ii])],px[ii]*sh_A_poly_reduced[ii])
+            #    est_model_poly+=tmp
 
             est_model_poly = tt.tensordot(px,sh_A_poly_reduced, axes=[[0],[0]])
             est_model_others = contam_scale*sh_contamf+tt.tensordot(bg_scale, sh_A_bg_reduced,axes=[[0],[0]])
@@ -781,7 +838,7 @@ class ResolvedModel(Photometry):
 
             for ib, beam in enumerate(self.st[id_key].beams):
                 beam.kernel = self.master_kernel[id_key][ib] * 1.0
-                beam.kernel *= self.ref_phot_dict[self.bands[0]][id_key]['flam']
+                beam.kernel *= self.ref_phot_dict[self.ref_grism_band][id_key]['flam']
                 beam._build_model()
 
             if PCA_keys is None:
@@ -924,14 +981,14 @@ class ResolvedModel(Photometry):
 
                         temp_holder = []
                         temp_sm_holder = []
-                        bp = self.ref_phot_dict[self.bands[0]]['pysyn']
+                        bp = self.ref_phot_dict[self.ref_grism_band]['pysyn']
                         for ii in range(AGE.shape[0]):
                             sp = S.ArraySpectrum(wave=WL * (1 + self.z), flux=(SPEC[ii] / (1 + self.z)),
                                                  waveunits='angstrom', fluxunits='flam')
                             temp_fl = np.interp(bp.wave, sp.wave, sp.flux * to_flamm)
                             n_before = np.trapz(temp_fl * bp.wave * bp.throughput, bp.wave) / \
                                        np.trapz(bp.throughput / bp.wave, bp.wave) / bp.pivot() ** 2
-                            sp = sp.renorm(self.ref_phot_dict[self.bands[0]][id_key]['flam'], 'flam', bp)
+                            sp = sp.renorm(self.ref_phot_dict[self.ref_grism_band][id_key]['flam'], 'flam', bp)
                             sp.convert('flam')
                             sp.convert('angstrom')
                             temp_fl = np.interp(bp.wave, sp.wave, sp.flux)
@@ -954,7 +1011,7 @@ class ResolvedModel(Photometry):
                             for j, beam in enumerate(self.st[id_key].beams):
                                 d_px = int(beam.sh[0] * beam.sh[1])
                                 A_spec_tmp[iiter, ii, i0:i0 + d_px] = beam.compute_model(spectrum_1d=fsps_templates[ii],
-                                                                                        in_place=False, is_cgs=False)/self.ref_phot_dict[self.bands[0]][id_key]['flam']
+                                                                                        in_place=False, is_cgs=False)/self.ref_phot_dict[self.ref_grism_band][id_key]['flam']
                                 i0 += d_px
 
                         # Create photometry
