@@ -132,8 +132,8 @@ class Photometry(object):
         # Create masks using segmentation map and user provided region reg_files
         # to calculate the initial photometry for each band
         if self.clean_im:
-            clean_seg_hdu = pyfits.open(self.im_root+band+'_seg_clean.fits')
-            seg_mask = np.zeros_like(clean_seg_hdu[self.sci_ext].data)
+            clean_seg_hdu = pyfits.open(self.im_root+self.ref_grism_band+'_seg_clean.fits')
+            seg_mask = np.zeros_like(clean_seg_hdu[self.sci_ext].data, dtype=np.bool)
             seg_mask[clean_seg_hdu[self.sci_ext].data==self.clean_im_id]=True
         else:
             seg_mask = np.zeros_like(self.ref_seg, dtype=np.bool)
@@ -162,14 +162,16 @@ class Photometry(object):
                             wht_path = self.im_root+band+'_drc_wht_clean.fits'
                         im_hdu = pyfits.open(im_path)
                         wht_hdu = pyfits.open(wht_path)
-                        reg_mask = self.regions.get_filter(im_hdu[self.sci_ext].header)[ireg].mask(im_hdu[self.sci_ext].data.shape)
+                        im=im_hdu[self.sci_ext].data*1.0
+                        wht=wht_hdu[self.sci_ext].data*1.0
+                        reg_mask = self.regions.get_filter(im_hdu[self.sci_ext].header)[ireg].mask(im.shape)
                         self.ref_phot_dict[band]['photflam']=im_hdu[self.sci_ext].header['PHOTFLAM']*1.0
                     else:
                         im = self.ref_im*1.0
                         wht = self.ref_wht*1.0
                         reg_mask = self.regions.get_filter(self.ref_hdu[self.sci_ext].header)[ireg].mask(im.shape)
                         self.ref_phot_dict[band]['photflam']=self.ref_hdu[self.sci_ext].header['PHOTFLAM']*1.0
-                    ref_reg_mask = self.regions.get_filter(self.ref_hdu[self.sci_ext].header)[ireg].mask(im.shape)
+                    ref_reg_mask = self.regions.get_filter(self.ref_hdu[self.sci_ext].header)[ireg].mask(self.ref_hdu[self.sci_ext].data.shape)
                     self.resolved_seg[ref_seg_mask & ref_reg_mask] = 1e4+ireg+1
                 else:
                     if self.clean_im:
