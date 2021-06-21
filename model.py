@@ -23,7 +23,8 @@ HIGH_PERC=0.9986
 
 class Photometry(object):
     def __init__(self, id, RA, DEC, global_photometry, global_bands, semiresolved_bands, semiresolved_bins,
-                im_root, clean_im=False, clean_im_id=-1, ref_phot_band=None, ref_grism_band=None, region_file=None, sci_ext=0, aper_correct_file=None):
+                im_root, clean_im=False, clean_im_id=-1, extra_mask=None, ref_phot_band=None, ref_grism_band=None,
+                region_file=None, sci_ext=0, aper_correct_file=None):
         """
         TBD
         """
@@ -43,6 +44,12 @@ class Photometry(object):
             self.clean_im_id = self.global_id
         else:
             self.clean_im_id = clean_im_id
+        if extra_mask is None:
+            self.extra_mask=None
+        else:
+            tmp_hdu=pyfits.open(extra_mask)
+            self.extra_mask = np.cast[np.bool](tmp_hdu[0].data)
+            tmp_hdu.close()
 
         self.ref_phot_dict={}
         for band in self.bands:
@@ -196,6 +203,8 @@ class Photometry(object):
                     reg_mask = self.regions.get_filter(im_hdu[self.sci_ext].header)[ireg].mask(im.shape)
 
                 mask = reg_mask & seg_mask
+                if self.extra_mask is not None:
+                    mask = mask & self.extra_mask
                 flam_ = im[mask].sum()
                 eflam_ = np.sqrt(np.sum(1.0/wht[mask]))
                 Npix = mask.sum()
@@ -257,7 +266,7 @@ class Photometry(object):
 
 class ResolvedModel(Photometry):
     def __init__(self,  z, grism_flts, id, RA, DEC, global_photometry, global_bands, semiresolved_bands, semiresolved_bins,
-                im_root, region_file, clean_im=False, clean_im_id=-1, ref_phot_band=None, ref_grism_band=None, sci_ext=0, aper_correct_file=None,
+                im_root, region_file, clean_im=False, clean_im_id=-1, extra_mask=None, ref_phot_band=None, ref_grism_band=None, sci_ext=0, aper_correct_file=None,
                 MW_EBV=0.0001, size=40, fcontam=0.1, gname='res_model', remove_grism_contam=True):
         """
         TBD
@@ -265,7 +274,7 @@ class ResolvedModel(Photometry):
 
         # Make photometric catalogs
         Photometry.__init__(self, id, RA, DEC, global_photometry, global_bands, semiresolved_bands, semiresolved_bins,
-                            im_root, clean_im, clean_im_id, ref_phot_band, ref_grism_band, region_file, sci_ext, aper_correct_file)
+                            im_root, clean_im, clean_im_id, extra_mask, ref_phot_band, ref_grism_band, region_file, sci_ext, aper_correct_file)
 
         self.grism_flts=grism_flts
         self.MW_EBV = MW_EBV
