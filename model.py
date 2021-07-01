@@ -706,7 +706,7 @@ class ResolvedModel(Photometry):
                 if fit_atten_curve:
                     ext_dust1=pm.Deterministic('ext_dust1', sh_dust1_*tt.exp(log_ext_dust1.dimshuffle(0,'x')*tt.ones((M,NxNy))))
                     ext_dust2=pm.Deterministic('ext_dust2', sh_dust2_*tt.exp(log_ext_dust2.dimshuffle(0,'x')*tt.ones((M,NxNy))))
-                    ext_dust_index=pm.Deterministic('ext_dust_index', sh_dust_index_+ext_dust_index.dimshuffle(0,'x')*tt.ones((M,NxNy)))
+                    ext_dust_index=pm.Deterministic('ext_dust_index', sh_dust_index_+dext_dust_index.dimshuffle(0,'x')*tt.ones((M,NxNy)))
                 else:
                     ext_dust1=pm.Deterministic('ext_dust1', sh_dust1_*1.0)
                     ext_dust2=pm.Deterministic('ext_dust2', sh_dust2_*1.0)
