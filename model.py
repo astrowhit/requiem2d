@@ -823,9 +823,9 @@ class ResolvedModel(Photometry):
                     Phot_obs_unresolved = pm.Potential('Phot_obs_unresolved', upper_limit_likelihood(est_model_phot_unresolved,
                                             eps_censored, len(iloc_semiresolved), 3*sh_eflam_semiresolved))
 
-    def make_joint_models(self, phot_prior_dict, weights_dict=None,
+    def make_joint_models(self, phot_prior_dict, weights_dict=None, age_bins=None, 
                                   PCA_keys=['logzsol', 'dust2'], PCA_nbox=[3, 4],
-                                  Nbox=15, make_PCA_plot=True, save_data=True):
+                                  Nbox=15, make_PCA_plot=True, save_data=True,):
         """
         TBD
         """
@@ -859,7 +859,10 @@ class ResolvedModel(Photometry):
             SPEC.append(spec[ll])
             STELLAR_MASS.append(sp_c.stellar_mass[ll])
         WL = wl * 1.0
-        AGE = np.asarray(AGE)
+        if age_bins is None:
+            AGE = np.asarray(AGE)
+        else:
+            AGE = np.logspace(np.log10(AGE[0]),np.log10(AGE[-1]),int(age_bins))
         SPEC = np.asarray(SPEC)
         STELLAR_MASS = np.asarray(STELLAR_MASS)
         AGE_edge=[1.08e-3]
