@@ -337,7 +337,7 @@ class ResolvedModel(Photometry):
         if save_data:
             self.grp.save_full_data()
 
-    def init_grism_mask(self, low_lim=1.2, up_lim=1.6):
+    def init_grism_mask(self, low_lim=1.2, up_lim=1.6, mask=[]):
         """
         TBD
         """
@@ -348,6 +348,10 @@ class ResolvedModel(Photometry):
             cond = (ref_wave * 0.0).astype(bool)
             loc = (ref_wave > low_lim) & (ref_wave < up_lim)
             cond = cond | loc
+            if len(mask)>0:
+                for wmin, wmax in mask:
+                    loc = (ref_wave > wmin) & (ref_wave < wmax)
+                    cond = cond & ~loc
             cond = cond.astype(np.int)
             cond = np.ones(beam.sh) * cond[np.newaxis, :]
             cond = cond.astype(bool)
@@ -457,12 +461,13 @@ class ResolvedModel(Photometry):
 
     def init_fitter(self, sfh_prior='linear_ar2', k=1, tau=400, include_spectroscopy=True,
                     include_global=True, low_pol=0, up_pol=2, regularize_old=False,
-                    mixture_photometry=True, include_semiresolved=True, complex_dust_geometry=False, fit_atten_curve=False):
+                    mixture_photometry=True, include_semiresolved=True, complex_dust_geometry=False, fit_atten_curve=False,
+                    low_lim=1.2, up_lim=1.6, mask=[]):
         """
         TBD
         """
 
-        self.init_grism_mask()
+        self.init_grism_mask(low_lim, up_lim, mask)
 
         A_spec_container=[]
         A_phot_container=[]
@@ -823,9 +828,9 @@ class ResolvedModel(Photometry):
                     Phot_obs_unresolved = pm.Potential('Phot_obs_unresolved', upper_limit_likelihood(est_model_phot_unresolved,
                                             eps_censored, len(iloc_semiresolved), 3*sh_eflam_semiresolved))
 
-    def make_joint_models(self, phot_prior_dict, weights_dict=None, age_bins=None, 
+    def make_joint_models(self, phot_prior_dict, weights_dict=None, age_bins=None,
                                   PCA_keys=['logzsol', 'dust2'], PCA_nbox=[3, 4],
-                                  Nbox=15, make_PCA_plot=True, save_data=True,):
+                                  Nbox=15, make_PCA_plot=True, save_data=True):
         """
         TBD
         """
