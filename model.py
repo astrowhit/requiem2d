@@ -405,7 +405,7 @@ class ResolvedModel(Photometry):
         else:
             self.ppc=hkl.load(path_to_ppc)
 
-    def load_joint_models(self, phot_prior_dict, weights, path=None):
+    def load_joint_models(self, phot_prior_dict, weights, path=None, age_bins=None):
         """
         TBD
         """
@@ -447,6 +447,11 @@ class ResolvedModel(Photometry):
             SPEC.append(spec[ll])
             STELLAR_MASS.append(sp_c.stellar_mass[ll])
         WL = wl * 1.0
+        if age_bins is None:
+            AGE = np.asarray(AGE)
+        else:
+            AGE = np.logspace(np.log10(AGE[0]),np.log10(AGE[-1]),int(age_bins))
+
         AGE = np.asarray(AGE)
         SPEC = np.asarray(SPEC)
         STELLAR_MASS = np.asarray(STELLAR_MASS)
@@ -460,7 +465,7 @@ class ResolvedModel(Photometry):
         self.AGE_width = (AGE_edge[1:]-AGE_edge[:-1])
 
     def init_fitter(self, sfh_prior='linear_ar2', k=1, tau=400, include_spectroscopy=True,
-                    include_global=True, low_pol=0, up_pol=2, regularize_old=False,
+                    include_global=True, low_pol=0, up_pol=2, regularize_old=False, regularize_young=False,
                     mixture_photometry=True, include_semiresolved=True, complex_dust_geometry=False, fit_atten_curve=False,
                     low_lim=1.2, up_lim=1.6, mask=[]):
         """
@@ -608,11 +613,17 @@ class ResolvedModel(Photometry):
         sh_A_poly_reduced=shared(np.asarray(A_poly)[:,:,self.fcc].reshape(((len(list(self.st.keys())))*(up_pol-low_pol),self.fcc.sum())))
 
         dt = self.AGE_width*1.0
-        A_mass_interp=nd.gaussian_filter(np.median(A_mass_container.reshape((len(list(self.st.keys())),
+        A_mass_interp=np.mean(A_mass_container.reshape((len(list(self.st.keys())),
                                                     (self.yN-1)*(self.xN-1),self.AGE.shape[0])),
-                                                   axis=1),sigma=5.0).T
+                                                   axis=1).T
         sh_dt = shared(((dt[:,None]/A_mass_interp)/(dt[:,None]/A_mass_interp).max(axis=0)[None,:]))
-        sh_reg=shared(np.exp(-self.AGE/5)[:,None]*np.ones((N,M)))
+        if regularize_old:
+            sh_reg_old=shared(np.exp(-self.AGE/5)[:,None]*np.ones((N,M)))
+        if regularize_young:
+            _reg=np.exp((self.AGE-1e-2)*100)
+            _reg[self.AGE>1.e-2]=1.0
+            sh_reg_young=shared(_reg[:,None]*np.ones((N,M)))
+
 
         young_age = self.AGE*0.0
         young_age[self.AGE<=0.01]=1.0
@@ -680,9 +691,15 @@ class ResolvedModel(Photometry):
             print('See Akhshik et. al. (2020): https://arxiv.org/pdf/2008.02276.pdf')
             return None
 
-        if regularize_old:
+        if regularize_old and regularize_young:
             with self.pymc3_model:
-                sfr=pm.Deterministic('sfr',sfr0*sh_reg)
+                sfr=pm.Deterministic('sfr',sfr0*sh_reg_old*sh_reg_young)
+        elif regularize_old:
+            with self.pymc3_model:
+                sfr=pm.Deterministic('sfr',sfr0*sh_reg_old)
+        elif regularize_young:
+            with self.pymc3_model:
+                sfr=pm.Deterministic('sfr',sfr0*sh_reg_young)
         else:
             with self.pymc3_model:
                 sfr=pm.Deterministic('sfr',sfr0*1.0)
@@ -702,9 +719,9 @@ class ResolvedModel(Photometry):
                 dir_dust_a = pm.Beta('dir_dust_a',1.0, 3.0, shape=(M,4))
                 w_dust_geo = pm.Deterministic('w_dust_geo', stick_breaking(dir_dust_a, M))
 
-                alpha_dust1 = pm.HalfNormal('alpha_dust1', sd=0.05)
-                alpha_dust2 = pm.HalfNormal('alpha_dust2', sd=0.05)
-                alpha_dust_index = pm.HalfNormal('alpha_dust_index', sd=0.1)
+                alpha_dust1 = pm.HalfNormal('alpha_dust1', sd=0.02)
+                alpha_dust2 = pm.HalfNormal('alpha_dust2', sd=0.02)
+                alpha_dust_index = pm.HalfNormal('alpha_dust_index', sd=0.2)
                 log_ext_dust1 = pm.Normal('log_ext_dust1',mu=0, sd=alpha_dust1,shape=(M))
                 log_ext_dust2 = pm.Normal('log_ext_dust2',mu=0,sd=alpha_dust2,shape=(M))
                 dext_dust_index = dustIndexNormal('dext_dust_index',mu=0,sd=alpha_dust_index,shape=(M))
@@ -735,15 +752,15 @@ class ResolvedModel(Photometry):
                 dir_dust_a = pm.Beta('dir_dust_a',1.0, 3.0, shape=(M,4))
                 w_dust_geo = pm.Deterministic('w_dust_geo', stick_breaking(dir_dust_a, M))
 
-                alpha_dust1 = pm.HalfNormal('alpha_dust1', sd=0.05)
-                alpha_dust2 = pm.HalfNormal('alpha_dust2', sd=0.05)
-                alpha_dust_index = pm.HalfNormal('alpha_dust_index', sd=0.1)
+                alpha_dust1 = pm.HalfNormal('alpha_dust1', sd=0.02)
+                alpha_dust2 = pm.HalfNormal('alpha_dust2', sd=0.02)
+                alpha_dust_index = pm.HalfNormal('alpha_dust_index', sd=0.2)
                 log_ext_dust1 = pm.Normal('log_ext_dust1',mu=0, sd=alpha_dust1,shape=(M))
                 log_ext_dust2 = pm.Normal('log_ext_dust2',mu=0,sd=alpha_dust2,shape=(M))
                 dext_dust_index = dustIndexNormal('dext_dust_index',mu=0,sd=alpha_dust_index,shape=(M))
                 ext_dust1=pm.Deterministic('ext_dust1', sh_dust1_*tt.exp(log_ext_dust1.dimshuffle(0,'x')*tt.ones((M,NxNy))))
                 ext_dust2=pm.Deterministic('ext_dust2', sh_dust2_*tt.exp(log_ext_dust2.dimshuffle(0,'x')*tt.ones((M,NxNy))))
-                ext_dust_index=pm.Deterministic('ext_dust_index', sh_dust_index_+ext_dust_index.dimshuffle(0,'x')*tt.ones((M,NxNy)))
+                ext_dust_index=pm.Deterministic('ext_dust_index', sh_dust_index_+dext_dust_index.dimshuffle(0,'x')*tt.ones((M,NxNy)))
 
                 corr_ = get_atten_curve(sh_dust1_, sh_dust2_, sh_dust_index_, ext_dust1, ext_dust2, ext_dust_index, sh_pwave, sh_young_age, sh)
                 corr_ir_ = get_atten_curve(sh_dust1_, sh_dust2_, sh_dust_index_, ext_dust1, ext_dust2, ext_dust_index, sh_pwave_ir, sh_young_age, sh_ir)
@@ -830,7 +847,8 @@ class ResolvedModel(Photometry):
 
     def make_joint_models(self, phot_prior_dict, weights_dict=None, age_bins=None,
                                   PCA_keys=['logzsol', 'dust2'], PCA_nbox=[3, 4],
-                                  Nbox=15, make_PCA_plot=True, save_data=True):
+                                  Nbox=15, make_PCA_plot=True, dust_tesc=None, add_neb_emission=True,
+                                  save_data=True):
         """
         TBD
         """
@@ -1001,6 +1019,8 @@ class ResolvedModel(Photometry):
 
                         for lbl in theta_labels:
                             sp_c.params[lbl] = draws_dict[lbl][ind_mg, ind_dg, iiter] * 1.0
+                        if dust_tesc:
+                            sp_c.params['dust_tesc']=dust_tesc
                         sp_c.params['sfh'] = 1
                         sp_c.params['fburst'] = 0
                         sp_c.params['tau'] = 100
@@ -1008,7 +1028,7 @@ class ResolvedModel(Photometry):
 
                         # Neb emissions
                         sp_c.params['gas_logu'] = -2.5
-                        sp_c.params['add_neb_emission'] = True
+                        sp_c.params['add_neb_emission'] = add_neb_emission
 
                         SPEC = []
                         STELLAR_MASS = []
