@@ -467,7 +467,7 @@ class ResolvedModel(Photometry):
     def init_fitter(self, sfh_prior='linear_ar2', k=1, tau=400, include_spectroscopy=True,
                     include_global=True, low_pol=0, up_pol=2, regularize_old=False, regularize_young=False,
                     mixture_photometry=True, include_semiresolved=True, complex_dust_geometry=False, fit_atten_curve=False,
-                    low_lim=1.2, up_lim=1.6, mask=[]):
+                    low_lim=1.2, up_lim=1.6, mask=[], spectroscopy_error_scale=False):
         """
         TBD
         """
@@ -798,8 +798,13 @@ class ResolvedModel(Photometry):
             est_model_others = contam_scale*sh_contamf+tt.tensordot(bg_scale, sh_A_bg_reduced,axes=[[0],[0]])
             full_model = est_model_spec +est_model_poly + est_model_others
             if include_spectroscopy:
-                Spec_obs=pm.Normal('Spec_obs',mu=full_model,sd=sh_stdf_s,
-                                      observed=sh_data_s, shape=(L,))
+                if spectroscopy_error_scale:
+                    eps_scale = pm.HalfCauchy('eps_scale', beta = 10)
+                    Spec_obs=pm.Normal('Spec_obs',mu=full_model,sd=eps_scale*sh_stdf_s,
+                                        observed=sh_data_s, shape=(L,))
+                else:
+                    Spec_obs=pm.Normal('Spec_obs',mu=full_model,sd=sh_stdf_s,
+                                        observed=sh_data_s, shape=(L,))
 
         if mixture_photometry:
             with self.pymc3_model:
